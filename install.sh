@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Instala o devlang: symlink no PATH + entrada no menu de aplicativos.
+# Instala devlang + deveditor: symlinks no PATH + entradas no menu de aplicativos.
 # Idempotente — pode rodar de novo depois de um `git pull`.
 #
 set -euo pipefail
@@ -11,18 +11,28 @@ APP_DIR="$HOME/.local/share/applications"
 
 mkdir -p "$BIN_DIR" "$APP_DIR"
 
-ln -sfn "$REPO_DIR/devlang" "$BIN_DIR/devlang"
-echo "  ✓ $BIN_DIR/devlang -> $REPO_DIR/devlang"
+for cmd in devlang deveditor; do
+  ln -sfn "$REPO_DIR/$cmd" "$BIN_DIR/$cmd"
+  echo "  ✓ $BIN_DIR/$cmd -> $REPO_DIR/$cmd"
+done
 
-sed "s|@DEVLANG@|$REPO_DIR/devlang|g; s|@HOME@|$HOME|g" \
-  "$REPO_DIR/devlang.desktop.in" > "$APP_DIR/devlang.desktop"
-echo "  ✓ $APP_DIR/devlang.desktop"
+for entry in devlang deveditor; do
+  sed "s|@CMD@|$REPO_DIR/$entry|g; s|@HOME@|$HOME|g" \
+    "$REPO_DIR/$entry.desktop.in" > "$APP_DIR/$entry.desktop"
+  echo "  ✓ $APP_DIR/$entry.desktop"
+done
 
 update-desktop-database "$APP_DIR" 2>/dev/null || true
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
-  *) echo "  ! Adicione ao seu shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+  *)
+    if [[ -f "$HOME/.profile" ]] && grep -q '.local/bin' "$HOME/.profile"; then
+      echo "  · ~/.local/bin entra no PATH no próximo login (via ~/.profile)"
+    else
+      echo "  ! Adicione ao seu shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\""
+    fi
+    ;;
 esac
 
-echo "Pronto. Rode:  devlang --list"
+echo "Pronto. Rode:  devlang --list   |   deveditor --list"

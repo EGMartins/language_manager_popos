@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+#
+# deveditor — instala/remove editores e distros de Neovim, fácil, no Pop!_OS.
+#             Companheiro do devlang (mesmo repositório).
+#
+# Uso:
+#   deveditor                     menu unificado (○ instala · ● remove)
+#   deveditor lazyvim zed         instala esses itens
+#   deveditor -r nvchad           remove o item
+#   deveditor --remove            menu só com o que está instalado
+#   deveditor --list              lista tudo e o que está instalado
+#   deveditor --replace lazyvim   instala o distro EM ~/.config/nvim (com backup)
+#   deveditor --gui               força o menu gráfico (zenity)
+#
+#   Distros de Neovim ficam LADO A LADO via NVIM_APPNAME: cada um vira um comando
+#   próprio (ex.: `astronvim`, `nvchad`) e uma entrada no menu de aplicativos.
+#   Seu ~/.config/nvim não é tocado (a não ser com --replace).
+#
+set -euo pipefail
+
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+DEVEDITOR_HOME="${DEVEDITOR_HOME:-$(dirname "$_self")}"
+DEVTOOL=deveditor
+# shellcheck source=/dev/null
+source "$DEVEDITOR_HOME/lib.sh"
+# shellcheck source=/dev/null
+source "$DEVEDITOR_HOME/editors.sh"
+
+STATE_DIR="${DEVEDITOR_STATE:-$HOME/.local/state/deveditor}"
+STATE_FILE="$STATE_DIR/installed"
+BIN_DIR="$HOME/.local/bin"
+APP_DIR="$HOME/.local/share/applications"
+REPLACE=0
+
+state_has() { sf_has "$STATE_FILE" "$1"; }
+state_add() { sf_add "$STATE_FILE" "$1"; }
+state_del() { sf_del "$STATE_FILE" "$1"; }
+
+# --------------------------------------------------------------------------
+# tipo / estado de cada item
+# --------------------------------------------------------------------------
+editor_kind() {
+  local id
+  for id in "${DISTRO_IDS[@]}"; do [[ "$id" == "$1" ]] && { echo distro; return; }; done
+  for id in "${APP_IDS[@]}";    do [[ "$id" == "$1" ]] && { echo app;    return; }; done
+  echo ""
+}
+
+# marcador de um distro dentro de um diretório de config (detecção manual/replace)
+distro_marker() {   # $1 id  $2 dir  -> 0 se o dir parece ser esse distro
+  case "$1" in
+    lazyvim)   [[ -f "$2/lazyvim.json" ]] ;;
+    astronvim) [[ -f "$2/lua/community.lua" ]] ;;
+    nvchad)    [[ -f "$2/lua/chadrc.lua" ]] ;;
+    *)         return 1 ;;
+  esac
+}
+
+distro_appname() {   # appname efetivo: estado > detecção em ~/.config/nvim > padrão
+  local id="$1" f="$STATE_DIR/$id.appname"
+  if [[ -f "$f" ]]; then cat "$f"; return; fi
+  distro_marker "$id" "$HOME/.config/nvim" && { echo nvim; return; }
+  "distro_$id"; echo "$APPNAME"
+}
+
+distro_installed() {
+  local id="$1"; state_has "distro:$id" && return 0
+  local app; app="$(distro_appname "$id")"
+  [[ -f "$HOME/.config/$app/init.lua" || -f "$HOME/.config/$app/init.vim" ]] || return 1
+  # se for o dir compartilhado ~/.config/nvim, confirma pelo marcador
+  [[ "$app" != nvim ]] || distro_marker "$id" "$HOME/.config/nvim"
+}
+
+app_installed() {
+  local id="$1"; "app_$id"
+  have "$CHECK" && return 0
+  dpkg -s "$CHECK" >/dev/null 2>&1 && return 0
+  state_has "app:$id"
+}
+
+is_installed() {
+  case "$(editor_kind "$1")" in
+    distro) distro_installed "$1" ;;
+    app)    app_installed "$1" ;;
+    *)      return 1 ;;
+  esac
+}
+
+# --------------------------------------------------------------------------
+# menu
+# --------------------------------------------------------------------------
+menu_rows() {   # id<TAB>on|off<TAB>display     filtro: all|installed|available
+  local filter="${1:-all}" id flag
+  for id in "${DISTRO_IDS[@]}"; do
+    LABEL=""; "distro_$id"
+    if distro_installed "$id"; then flag=on; else flag=off; fi
+    [[ "$filter" == installed && "$flag" == off ]] && continue
+    [[ "$filter" == available && "$flag" == on  ]] && continue
+    if [[ "$flag" == on ]]; then
+      printf '%s\t%s\t● Nvim · %s  (%s)\n' "$id" "$flag" "$LABEL" "$(distro_appname "$id")"
+    else
+      printf '%s\t%s\t○ Nvim · %s\n' "$id" "$flag" "$LABEL"
+    fi
+  done
+  for id in "${APP_IDS[@]}"; do
+    LABEL=""; "app_$id"
+    if app_installed "$id"; then flag=on; else flag=off; fi
+    [[ "$filter" == installed && "$flag" == off ]] && continue
+    [[ "$filter" == available && "$flag" == on  ]] && continue
+    if [[ "$flag" == on ]]; then
+      printf '%s\t%s\t● Editor · %s  (instalado)\n' "$id" "$flag" "$LABEL"
+    else
+      printf '%s\t%s\t○ Editor · %s\n' "$id" "$flag" "$LABEL"
+    fi
+  done
+}
+
+# --------------------------------------------------------------------------
+# Neovim base p/ os distros
+# --------------------------------------------------------------------------
+ensure_nvim() {
+  local v maj min
+  if have nvim; then
+    v="$(nvim --version | head -1 | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    maj="${v%.*}"; min="${v#*.}"
+    if ((maj > 0)) || ((min >= 10)); then return 0; fi
+    warn "Neovim v$v é antigo; os distros modernos pedem 0.10+"
+  else
+    say "Neovim não encontrado"
+  fi
+  confirm "Instalar a última versão estável do Neovim agora?" || die "Neovim 0.10+ é necessário"
+  install_neovim
+}
+
+# --------------------------------------------------------------------------
+# distros
+# --------------------------------------------------------------------------
+distro_wrapper() {   # cria ~/.local/bin/<app>  -> nvim com NVIM_APPNAME
+  local app="$1"
+  [[ "$app" == nvim ]] && return 0
+  mkdir -p "$BIN_DIR"
+  cat > "$BIN_DIR/$app" <<EOF
+#!/usr/bin/env bash
+exec env NVIM_APPNAME="$app" nvim "\$@"
+EOF
+  chmod +x "$BIN_DIR/$app"
+  ok "comando: $app"
+}
+
+distro_desktop() {   # entrada no menu de aplicativos
+  local app="$1" label="$2"
+  [[ "$app" == nvim ]] && return 0
+  mkdir -p "$APP_DIR"
+  cat > "$APP_DIR/nvim-$app.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$label
+Comment=Neovim ($app) via NVIM_APPNAME
+Exec=env NVIM_APPNAME=$app nvim %F
+Icon=nvim
+Terminal=true
+Categories=Development;TextEditor;
+EOF
+  update-desktop-database "$APP_DIR" 2>/dev/null || true
+  ok "menu de aplicativos: $label"
+}
+
+install_distro() {
+  local id="$1"; LABEL=""; REPO=""; APPNAME=""; KIND=""; DESC=""; "distro_$id"
+  local label="$LABEL" repo="$REPO" app="$APPNAME"
+  ((REPLACE)) && app="nvim"
+
+  printf '\n%s\n' "${c_bold}${c_blue}━━ $label  →  NVIM_APPNAME=$app ━━${c_reset}"
+  ensure_nvim
+
+  apt_install git curl
+  local cfg="$HOME/.config/$app"
+  if [[ -e "$cfg" ]]; then
+    if ((REPLACE)); then
+      local bak="$cfg.bak-$(date +%Y%m%d%H%M%S)"
+      say "Backup do config atual: $bak"
+      mv "$cfg" "$bak"
+    elif distro_installed "$id"; then
+      confirm "$label já está em $cfg. Reinstalar (apaga customizações)?" || { ok "mantido"; return 0; }
+      rm -rf "$cfg"
+    else
+      confirm "$cfg já existe (outro config). Sobrescrever?" || die "cancelado"
+      mv "$cfg" "$cfg.bak-$(date +%Y%m%d%H%M%S)"
+    fi
+  fi
+
+  say "git clone $repo"
+  git clone --depth=1 "$repo" "$cfg"
+  rm -rf "$cfg/.git"
+  mkdir -p "$STATE_DIR"; printf '%s\n' "$app" > "$STATE_DIR/$id.appname"
+
+  say "Primeira sincronização (Lazy sync) — pode demorar…"
+  NVIM_APPNAME="$app" nvim --headless "+Lazy! sync" +qa 2>&1 | tail -n 3 | sed 's/^/    /' || \
+    warn "sync terminou com avisos"
+  # NvChad precisa de um 2º start pra baixar o base46/mason inicial
+  [[ "$id" == nvchad ]] && NVIM_APPNAME="$app" timeout 300 nvim --headless "+q" >/dev/null 2>&1 || true
+
+  distro_wrapper "$app"
+  distro_desktop "$app" "$label"
+  state_add "distro:$id"
+
+  printf '%s\n' "${c_green}${c_bold}✓ $label pronto.${c_reset}"
+  if [[ "$app" == nvim ]]; then
+    printf '  Abra com: %snvim%s\n' "$c_bold" "$c_reset"
+  else
+    printf '  Abra com: %s%s%s   (ou pelo menu de aplicativos)\n' "$c_bold" "$app" "$c_reset"
+    printf '  devlang usa esse: %sdevlang --appname %s <linguagem>%s\n' "$c_bold" "$app" "$c_reset"
+  fi
+}
+
+remove_distro() {
+  local id="$1"; LABEL=""; "distro_$id"
+  local app; app="$(distro_appname "$id")"
+  printf '\n%s\n' "${c_bold}${c_blue}━━ remover: $LABEL ($app) ━━${c_reset}"
+
+  if [[ "$app" == nvim ]]; then
+    warn "esse distro está em ~/.config/nvim (modo --replace)."
+    confirm "Apagar ~/.config/nvim?" || { ok "mantido"; return 0; }
+  else
+    confirm "Apagar a config de $LABEL ($HOME/.config/$app) e o comando '$app'?" || { ok "mantido"; return 0; }
+  fi
+
+  local d
+  for d in "$HOME/.config/$app" "$HOME/.local/share/$app" "$HOME/.local/state/$app" "$HOME/.cache/$app"; do
+    [[ -e "$d" ]] && { rm -rf "$d"; ok "removido: $d"; }
+  done
+  [[ "$app" != nvim ]] && rm -f "$BIN_DIR/$app" "$APP_DIR/nvim-$app.desktop"
+  rm -f "$STATE_DIR/$id.appname"
+  state_del "distro:$id"
+
+  # restaura backup mais recente, se houver (só no modo replace)
+  if [[ "$app" == nvim ]]; then
+    local bak; bak="$(ls -1d "$HOME/.config/nvim.bak-"* 2>/dev/null | sort | tail -1 || true)"
+    [[ -n "$bak" ]] && confirm "Restaurar o backup $bak para ~/.config/nvim?" && mv "$bak" "$HOME/.config/nvim" && ok "restaurado"
+  fi
+  printf '%s\n' "${c_green}${c_bold}✓ $LABEL removido.${c_reset}"
+}
+
+# --------------------------------------------------------------------------
+# apps
+# --------------------------------------------------------------------------
+install_app() {
+  local id="$1"; LABEL=""; INSTALL_FN=""; "app_$id"
+  printf '\n%s\n' "${c_bold}${c_blue}━━ $LABEL ━━${c_reset}"
+  if app_installed "$id"; then
+    confirm "$LABEL já parece instalado. Rodar a instalação mesmo assim?" || { ok "mantido"; return 0; }
+  fi
+  "$INSTALL_FN"
+  state_add "app:$id"
+  printf '%s\n' "${c_green}${c_bold}✓ $LABEL instalado.${c_reset}"
+}
+
+remove_app() {
+  local id="$1"; LABEL=""; REMOVE_FN=""; "app_$id"
+  printf '\n%s\n' "${c_bold}${c_blue}━━ remover: $LABEL ━━${c_reset}"
+  confirm "Remover $LABEL?" || { ok "mantido"; return 0; }
+  "$REMOVE_FN"
+  state_del "app:$id"
+  printf '%s\n' "${c_green}${c_bold}✓ $LABEL removido.${c_reset}"
+}
+
+# --------------------------------------------------------------------------
+install_item() {
+  case "$(editor_kind "$1")" in
+    distro) install_distro "$1" ;;
+    app)    install_app "$1" ;;
+    *)      die "item desconhecido: $1  (veja: deveditor --list)" ;;
+  esac
+}
+remove_item() {
+  case "$(editor_kind "$1")" in
+    distro) remove_distro "$1" ;;
+    app)    remove_app "$1" ;;
+    *)      die "item desconhecido: $1" ;;
+  esac
+}
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+usage() { sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; }
+
+main() {
+  local action="" args=()
+  while (($#)); do
+    case "$1" in
+      -h|--help) usage; exit 0 ;;
+      -l|--list)
+        menu_rows all | while IFS=$'\t' read -r id flag disp; do
+          [[ "$flag" == on ]] && m="${c_green}✓${c_reset}" || m=" "
+          printf '  %s %-14s %s\n' "$m" "$id" "${disp#* · }"
+        done
+        exit 0 ;;
+      -r|--remove|--uninstall) action="remove" ;;
+      -i|--install)            action="install" ;;
+      -y|--yes)                ASSUME_YES=1 ;;
+      --replace)               REPLACE=1 ;;
+      --gui)                   FORCE_ZENITY=1 ;;
+      --) shift; args+=("$@"); break ;;
+      -*) die "opção desconhecida: $1" ;;
+      *)  args+=("$1") ;;
+    esac
+    shift
+  done
+
+  if ((${#args[@]})); then
+    for id in "${args[@]}"; do
+      if [[ "$action" == remove ]]; then remove_item "$id"; else install_item "$id"; fi
+    done
+    printf '\n%s\n' "${c_green}${c_bold}Concluído.${c_reset}"
+    return 0
+  fi
+
+  if [[ -z "$action" ]] && { [[ "${FORCE_ZENITY:-0}" == 1 ]] || [[ ! -t 2 && ! -e /dev/tty ]]; } && have zenity; then
+    action="$(gui_pick_action)"; [[ -z "$action" ]] && exit 0
+  fi
+
+  local selected=()
+  case "$action" in
+    remove)
+      mapfile -t selected < <(menu_rows installed | choose "Editores/distros para REMOVER")
+      ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
+      for id in "${selected[@]}"; do id="${id//[[:space:]]/}"; [[ -n "$id" ]] && remove_item "$id"; done
+      ;;
+    install)
+      mapfile -t selected < <(menu_rows available | choose "Editores/distros para INSTALAR")
+      ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
+      for id in "${selected[@]}"; do id="${id//[[:space:]]/}"; [[ -n "$id" ]] && install_item "$id"; done
+      ;;
+    *)
+      mapfile -t selected < <(menu_rows all | choose "● = instalado (marcar remove) · ○ = disponível (marcar instala)")
+      ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
+      for id in "${selected[@]}"; do
+        id="${id//[[:space:]]/}"; [[ -z "$id" ]] && continue
+        if is_installed "$id"; then remove_item "$id"; else install_item "$id"; fi
+      done
+      ;;
+  esac
+
+  printf '\n%s\n' "${c_green}${c_bold}Concluído.${c_reset}"
+  desktop_close_prompt
+}
+
+main "$@"

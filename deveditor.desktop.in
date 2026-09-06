@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Dev Languages
-Comment=Instala linguagens e configura o LazyVim (parser, LSP, formatter)
+Name=Dev Editors
+Comment=Instala editores e distros de Neovim (LazyVim, AstroNvim, NvChad, Zed, VS Code…)
 Exec=env PATH=@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin DEVLANG_LAUNCHER=desktop @CMD@
 Icon=applications-development
 Terminal=true
 Categories=Development;Utility;
-Keywords=language;linguagem;lsp;neovim;lazyvim;mise;install;
+Keywords=editor;neovim;lazyvim;astronvim;nvchad;zed;vscode;helix;install;

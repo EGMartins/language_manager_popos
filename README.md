@@ -2,10 +2,15 @@
 
 [English](README.en.md) · **Português**
 
-Utilitário estilo [Omarchy](https://omarchy.org) (`omarchy-install-dev-*`) para o
-**Pop!_OS**: escolhe uma ou mais linguagens num menu e ele instala o runtime e
-configura o **LazyVim** — parser do Treesitter, LSP via Mason, formatter/linter —
-usando o "extra" oficial do LazyVim para cada linguagem.
+Dois utilitários estilo [Omarchy](https://omarchy.org) para o **Pop!_OS**, com menu
+único no terminal:
+
+- **`devlang`** — escolhe linguagens e instala o runtime + configura o editor
+  (parser do Treesitter, LSP via Mason, formatter). Suporte completo ao **LazyVim**;
+  **AstroNvim** e **NvChad** via detecção do distro ativo.
+- **`deveditor`** — instala editores e distros de Neovim: **LazyVim, AstroNvim,
+  NvChad, kickstart** (lado a lado via `NVIM_APPNAME`) e **Neovim, Zed, VS Code,
+  VSCodium, Helix, Emacs, Sublime Text, micro**.
 
 ## Instalação
 
@@ -15,8 +20,30 @@ cd language_manager_popos
 ./install.sh
 ```
 
-`install.sh` cria o symlink `~/.local/bin/devlang` e a entrada **Dev Languages** no
-menu de aplicativos. É idempotente — rode de novo depois de um `git pull`.
+`install.sh` cria os symlinks `~/.local/bin/{devlang,deveditor}` e as entradas
+**Dev Languages** / **Dev Editors** no menu de aplicativos. É idempotente — rode de
+novo depois de um `git pull`.
+
+## deveditor
+
+```bash
+deveditor                   # menu unificado (○ instala · ● remove)
+deveditor lazyvim zed       # instala esses itens
+deveditor -r nvchad         # remove
+deveditor --list            # o que está disponível/instalado
+deveditor --replace lazyvim # instala o distro EM ~/.config/nvim (faz backup)
+```
+
+**Distros de Neovim ficam lado a lado** via `NVIM_APPNAME`: cada um vira um comando
+(`astronvim`, `nvchad`, `kickstart`) + entrada no menu de aplicativos, com config em
+`~/.config/<nome>`, `share`/`state`/`cache` próprios. Seu `~/.config/nvim` não é
+tocado (a não ser com `--replace`, que faz backup antes).
+
+Depois: `devlang --appname astronvim go` instala Go naquele distro específico.
+
+Editores standalone: repo apt oficial (VS Code, VSCodium, Sublime), PPA (Helix),
+script oficial sem root (Zed), tarball do GitHub (Neovim), apt (Emacs, micro).
+Remover desfaz o que deu pra desfazer (apt remove + tira o repo; não mexe em config).
 
 ## Uso
 
@@ -52,11 +79,14 @@ com o menu (uma janela), instala/remove ali mesmo e espera um ENTER no fim.
 
 | Arquivo | Papel |
 |---|---|
-| `devlang` | script principal (menu + instalação + remoção) |
-| `registry.sh` | catálogo de linguagens — **edite aqui para adicionar/remover** |
-| `provision.lua` | roda no `nvim --headless`: carrega os plugins e instala/poda parser/LSP |
-| `install.sh` | cria symlink + entrada de menu |
-| `devlang.desktop.in` | template da entrada do menu de aplicativos |
+| `devlang` | linguagens: menu + instalação + remoção |
+| `deveditor` | editores e distros de Neovim: menu + instalação + remoção |
+| `lib.sh` | helpers compartilhados (menu, cores, estado, apt, confirm) |
+| `registry.sh` | catálogo de linguagens — **edite aqui p/ adicionar/remover** |
+| `editors.sh` | catálogo de editores/distros |
+| `provision.lua` | roda no `nvim --headless`: carrega plugins e instala/poda parser/LSP |
+| `install.sh` | cria os symlinks + entradas de menu |
+| `*.desktop.in` | templates das entradas do menu de aplicativos |
 
 ## Adicionar uma linguagem
 
