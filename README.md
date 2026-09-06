@@ -1,5 +1,7 @@
 # language_manager_popos
 
+[English](README.en.md) · **Português**
+
 Utilitário estilo [Omarchy](https://omarchy.org) (`omarchy-install-dev-*`) para o
 **Pop!_OS**: escolhe uma ou mais linguagens num menu e ele instala o runtime e
 configura o **LazyVim** — parser do Treesitter, LSP via Mason, formatter/linter —
