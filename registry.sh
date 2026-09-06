@@ -241,3 +241,42 @@ lang_vue() {
   MASON_PKGS=""
   POST_FN=""
 }
+
+# ==========================================================================
+# Mapa parser(Treesitter) + LSP(Mason) + pack(astrocommunity) por linguagem.
+# Usado quando o distro alvo NÃO é o LazyVim (AstroNvim / NvChad / kickstart),
+# onde não há o conceito de "extra". No LazyVim o próprio extra já cobre isso.
+# ==========================================================================
+declare -A TS_MAP=(
+  [go]="go gomod gowork gosum"      [rust]="rust"
+  [python]="python"                 [typescript]="typescript tsx javascript jsdoc"
+  [deno]="typescript tsx javascript" [ruby]="ruby"
+  [lua]="lua luadoc"                [c_cpp]="c cpp"
+  [zig]="zig"                       [elixir]="elixir eex heex"
+  [java]="java"                     [kotlin]="kotlin"
+  [php]="php phpdoc"                [bash]="bash"
+  [sql]="sql"                       [terraform]="terraform hcl"
+  [docker]="dockerfile"             [json]="json jsonc"
+  [yaml]="yaml"                     [markdown]="markdown markdown_inline"
+  [tailwind]="css"                  [astro]="astro"
+  [svelte]="svelte"                 [vue]="vue"
+)
+declare -A LSP_MAP=(
+  [go]="gopls"                      [rust]="rust-analyzer"
+  [python]="basedpyright ruff"      [typescript]="vtsls"
+  [deno]=""                         [ruby]="ruby-lsp"
+  [lua]="lua-language-server"       [c_cpp]="clangd"
+  [zig]="zls"                       [elixir]="elixir-ls"
+  [java]="jdtls"                    [kotlin]="kotlin-language-server"
+  [php]="phpactor"                  [bash]="bash-language-server"
+  [sql]="sqlls"                     [terraform]="terraform-ls"
+  [docker]="dockerfile-language-server" [json]="json-lsp"
+  [yaml]="yaml-language-server"     [markdown]="marksman"
+  [tailwind]="tailwindcss-language-server" [astro]="astro-language-server"
+  [svelte]="svelte-language-server" [vue]="vue-language-server"
+)
+declare -A ASTRO_MAP=(
+  [typescript]="typescript-all"     [c_cpp]="cpp"
+  [markdown]="markdown"             [tailwind]="tailwindcss"
+)
+# demais linguagens: o pack do astrocommunity tem o mesmo nome do id

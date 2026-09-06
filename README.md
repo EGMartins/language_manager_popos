@@ -65,15 +65,21 @@ com o menu (uma janela), instala/remove ali mesmo e espera um ENTER no fim.
 
 ## O que cada instalação faz
 
-1. `ensure_base` — instala `curl`, `git`, `build-essential` e o **mise**
-   (gerenciador de runtimes, só quando a linguagem precisa de um)
-2. `apt` — toolchain de build específico (ex.: headers para compilar Ruby/Python)
+1. `ensure_base` — `curl`, `git`, `build-essential` e o **mise** (só quando a
+   linguagem precisa de um runtime)
+2. `apt` — toolchain de build específico (ex.: headers p/ compilar Ruby/Python)
 3. `mise use -g <tool>` — o runtime (Go, Node, Python…), global
-4. adiciona `lazyvim.plugins.extras.lang.<x>` em `~/.config/nvim/lazyvim.json`
-5. roda `provision.lua` em `nvim --headless`: `Lazy sync`, instala os parsers do
-   Treesitter e os LSP servers/formatters via Mason (síncrono — carrega os plugins
-   lazy-loaded antes de instalar)
-6. passo final opcional (ex.: `rustup component add rust-analyzer`)
+4. **depende do distro detectado em `~/.config/nvim`** (ou o de `--appname`):
+   - **LazyVim** → adiciona `lazyvim.plugins.extras.lang.<x>` no `lazyvim.json` e
+     roda `provision.lua` (`Lazy sync` + parser + LSP/formatter via Mason,
+     carregando os plugins lazy-loaded antes)
+   - **AstroNvim** → adiciona `{ import = "astrocommunity.pack.<x>" }` em
+     `lua/community.lua` + instala parser e LSP (`provision_generic.lua`)
+   - **NvChad / kickstart / desconhecido** → instala o parser do Treesitter e o
+     LSP server via Mason direto; avisa como habilitar o server na config
+5. passo final opcional (ex.: `rustup component add rust-analyzer`)
+
+Cada distro tem seu próprio Mason/parsers isolado (`~/.local/share/<appname>/…`).
 
 ## Estrutura
 
@@ -82,9 +88,10 @@ com o menu (uma janela), instala/remove ali mesmo e espera um ENTER no fim.
 | `devlang` | linguagens: menu + instalação + remoção |
 | `deveditor` | editores e distros de Neovim: menu + instalação + remoção |
 | `lib.sh` | helpers compartilhados (menu, cores, estado, apt, confirm) |
-| `registry.sh` | catálogo de linguagens — **edite aqui p/ adicionar/remover** |
+| `registry.sh` | catálogo de linguagens + mapa parser/LSP/pack por linguagem |
 | `editors.sh` | catálogo de editores/distros |
-| `provision.lua` | roda no `nvim --headless`: carrega plugins e instala/poda parser/LSP |
+| `provision.lua` | LazyVim: `nvim --headless` carrega plugins e instala/poda parser/LSP |
+| `provision_generic.lua` | AstroNvim/NvChad/kickstart: instala/remove parser+LSP direto |
 | `install.sh` | cria os symlinks + entradas de menu |
 | `*.desktop.in` | templates das entradas do menu de aplicativos |
 
@@ -102,7 +109,12 @@ Em `registry.sh`, copie um bloco `lang_<id>()`, ajuste os campos e acrescente o
 | `MASON_PKGS` | pacotes Mason extras a forçar |
 | `POST_FN` | nome de uma função opcional a rodar no fim |
 
-Lista de extras: <https://www.lazyvim.org/extras>
+E acrescente o parser/LSP nos mapas `TS_MAP` / `LSP_MAP` (e `ASTRO_MAP` se o pack
+do astrocommunity tiver nome diferente do id) no fim do `registry.sh` — usados
+quando o alvo não é o LazyVim.
+
+Lista de extras do LazyVim: <https://www.lazyvim.org/extras> ·
+packs do astrocommunity: <https://github.com/AstroNvim/astrocommunity>
 
 ## Remover uma linguagem
 
@@ -112,23 +124,23 @@ devlang -r go        # ou: devlang --remove  (menu)
 
 O que acontece:
 
-1. remove `lazyvim.plugins.extras.lang.<x>` do `lazyvim.json`
-2. `provision.lua` roda em modo _prune_: desinstala os **LSP servers e parsers
-   órfãos** — ou seja, o que não é mais desejado pela sua config do LazyVim.
-   Parsers que o LazyVim já traz por padrão (ex.: `typescript`, `tsx`)
-   **permanecem**, porque o LazyVim os reinstalaria no próximo boot
-3. pergunta se quer remover o runtime do **mise** também (`node`, `go`…) — fica a
-   seu critério, já que você pode usá-lo fora do editor
-4. pacotes `apt` (build-essential, headers…) **não** são removidos (podem ser
-   compartilhados com outras linguagens)
+1. tira a integração do editor (extra do LazyVim / import do astrocommunity)
+2. modo _prune_: desinstala os **LSP servers e parsers que nenhuma outra
+   linguagem instalada ainda usa**. No LazyVim, parsers que ele traz por padrão
+   (ex.: `typescript`) permanecem — ele os reinstalaria no próximo boot
+3. pergunta se quer remover o runtime do **mise** (`node`, `go`…) — fica a seu
+   critério, já que você pode usá-lo fora do editor
+4. pacotes `apt` **não** são removidos (podem ser compartilhados)
 
-O devlang registra o que instalou em `~/.local/state/devlang/installed`.
+Estado por distro em `~/.local/state/devlang/<appname>.installed`.
 
-## Desinstalar o devlang
+## Desinstalar
 
 ```bash
-rm ~/.local/bin/devlang ~/.local/share/applications/devlang.desktop
-rm -rf ~/.local/share/devlang ~/.local/state/devlang
+rm ~/.local/bin/{devlang,deveditor} \
+   ~/.local/share/applications/{devlang,deveditor}.desktop
+rm -rf ~/.local/state/{devlang,deveditor}
+# distros instalados pelo deveditor: remova com `deveditor -r <id>` antes
 ```
 
 ## Licença

@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
 #
-# devlang — instala/remove uma linguagem + suporte no LazyVim (parser, LSP,
-#           formatter…) no estilo dos scripts omarchy-install-dev-* do Omarchy.
+# devlang — instala/remove uma linguagem + suporte no editor (parser do
+#           Treesitter, LSP via Mason, formatter), estilo omarchy-install-dev-*.
 #
 # Uso:
-#   devlang                    menu unificado (○ instala · ● remove)
-#   devlang go rust python     instala essas linguagens
-#   devlang -r go              remove a linguagem (extra do LazyVim + parser/LSP órfãos)
-#   devlang --remove           menu só com as linguagens instaladas
-#   devlang --list             lista os ids e o que está instalado
-#   devlang --gui              força o menu gráfico (zenity)
+#   devlang                     menu unificado (○ instala · ● remove)
+#   devlang go rust python      instala essas linguagens
+#   devlang -r go               remove a linguagem (config + parser/LSP órfãos)
+#   devlang --remove            menu só com as linguagens instaladas
+#   devlang --list              lista os ids e o que está instalado
+#   devlang --appname astronvim go   mira outro distro (ver: deveditor --list)
+#   devlang --gui               força o menu gráfico (zenity)
 #
-#   Menus: usa fzf ou gum se instalados, senão zenity, senão lista numerada.
+#   Alvo padrão: ~/.config/nvim. Detecta LazyVim / AstroNvim / NvChad / kickstart.
+#   No LazyVim usa os "extras"; nos outros instala parser+LSP direto.
 #
 set -euo pipefail
 
 # resolve o diretório real do script (mesmo chamado via symlink em ~/.local/bin)
 _self="$(readlink -f "${BASH_SOURCE[0]}")"
 DEVLANG_HOME="${DEVLANG_HOME:-$(dirname "$_self")}"
-NVIM_CONFIG="${NVIM_CONFIG:-$HOME/.config/nvim}"
-LAZYVIM_JSON="$NVIM_CONFIG/lazyvim.json"
 
 DEVTOOL=devlang
 # shellcheck source=/dev/null
@@ -28,18 +28,51 @@ source "$DEVLANG_HOME/lib.sh"
 source "$DEVLANG_HOME/registry.sh"
 
 # --------------------------------------------------------------------------
-# estado: quais linguagens foram instaladas pelo devlang
+# alvo: qual config de Neovim (LazyVim padrão, ou um distro via --appname)
+# --------------------------------------------------------------------------
+APPNAME="${NVIM_APPNAME:-nvim}"          # sobrescrito por --appname
+NVIM_CONFIG="$HOME/.config/$APPNAME"
+LAZYVIM_JSON="$NVIM_CONFIG/lazyvim.json"
+DISTRO=""                                # preenchido por set_target()
+
+set_target() {   # $1 = appname
+  APPNAME="$1"
+  NVIM_CONFIG="$HOME/.config/$APPNAME"
+  LAZYVIM_JSON="$NVIM_CONFIG/lazyvim.json"
+  STATE_FILE="$STATE_DIR/$APPNAME.installed"
+  DISTRO="$(detect_distro "$NVIM_CONFIG")"
+}
+
+detect_distro() {   # $1 = dir de config -> lazyvim|astronvim|nvchad|kickstart|unknown
+  local d="$1"
+  [[ -f "$d/lazyvim.json" ]] && { echo lazyvim; return; }
+  [[ -f "$d/lua/community.lua" ]] && { echo astronvim; return; }
+  [[ -f "$d/lua/chadrc.lua" ]] && { echo nvchad; return; }
+  grep -rqs "kickstart" "$d/init.lua" 2>/dev/null && { echo kickstart; return; }
+  [[ -f "$d/init.lua" || -f "$d/init.vim" ]] && { echo unknown; return; }
+  echo none
+}
+
+# --------------------------------------------------------------------------
+# estado: quais linguagens foram instaladas (por appname)
 # --------------------------------------------------------------------------
 STATE_DIR="${DEVLANG_STATE:-$HOME/.local/state/devlang}"
-STATE_FILE="$STATE_DIR/installed"
+STATE_FILE="$STATE_DIR/$APPNAME.installed"
+# migração do formato antigo (arquivo único "installed" == alvo nvim)
+[[ -f "$STATE_DIR/installed" && ! -f "$STATE_DIR/nvim.installed" ]] && \
+  mv "$STATE_DIR/installed" "$STATE_DIR/nvim.installed"
 
-state_has() { sf_has "$STATE_FILE" "$1"; }
-state_add() { sf_add "$STATE_FILE" "$1"; }
-state_del() { sf_del "$STATE_FILE" "$1"; }
+state_has()  { sf_has "$STATE_FILE" "$1"; }
+state_add()  { sf_add "$STATE_FILE" "$1"; }
+state_del()  { sf_del "$STATE_FILE" "$1"; }
+state_list() { sf_list "$STATE_FILE"; }
 
-# instalada = está no state file OU o extra do LazyVim correspondente está ativo
+DISTRO="$(detect_distro "$NVIM_CONFIG")"
+
+# instalada = está no state file OU (no LazyVim) o extra correspondente está ativo
 is_installed() {
   state_has "$1" && return 0
+  [[ "$DISTRO" == lazyvim || -z "$DISTRO" ]] || return 1
   local extra=""
   LABEL=""; LAZY_EXTRA=""; "lang_$1"; extra="$LAZY_EXTRA"
   [[ -n "$extra" ]] && grep -qF "\"$extra\"" "$LAZYVIM_JSON" 2>/dev/null
@@ -160,33 +193,83 @@ remove_lazy_extra() {
 }
 
 # --------------------------------------------------------------------------
-# sincronização do Neovim (headless)
+# execução do Neovim no alvo (respeita NVIM_APPNAME)
 # --------------------------------------------------------------------------
-sync_nvim() {
-  local mason_extra="$1" ts_extra="$2" prune="${3:-}"
-  local init="$NVIM_CONFIG/init.lua"
+nvim_run() {
+  if [[ "$APPNAME" == nvim ]]; then timeout 1200 nvim --headless "$@"
+  else timeout 1200 env NVIM_APPNAME="$APPNAME" nvim --headless "$@"; fi
+}
+_filter_provision() { grep -E '\[provision\]|error|Error|warning' | sed 's/^/    /'; }
 
-  if [[ ! -f "$init" ]]; then
-    warn "sem $init — pulei a sincronização do Neovim"
-    return 0
-  fi
-
-  if [[ "$prune" == "prune" ]]; then
-    say "Sincronizando LazyVim (removendo parsers/LSP não usados)…"
-  else
-    say "Sincronizando LazyVim (plugins, parsers do Treesitter, LSP via Mason)…"
-    say "  isso pode levar alguns minutos na 1ª vez; não feche."
-  fi
-
-  # provision.lua carrega os plugins lazy-loaded ANTES de instalar/remover parser/LSP
-  # (em --headless o LazyVim não carrega treesitter/mason sozinho)
-  DEVLANG_MASON="$mason_extra" DEVLANG_TS="$ts_extra" \
-  DEVLANG_PRUNE="$([[ "$prune" == "prune" ]] && echo 1 || echo 0)" timeout 1200 \
-    nvim --headless -u "$init" -c "luafile $DEVLANG_HOME/provision.lua" 2>&1 \
-    | grep -E '\[provision\]|error|Error|warning' | sed 's/^/    /' \
-    || warn "provisionamento terminou com avisos (veja acima)"
-
+# LazyVim: provision.lua completo (extras + parser + LSP + prune)
+provision_lazyvim() {
+  local mason="$1" ts="$2" prune="${3:-}"
+  [[ -f "$NVIM_CONFIG/init.lua" ]] || { warn "sem $NVIM_CONFIG/init.lua"; return 0; }
+  if [[ "$prune" == prune ]]; then say "Sincronizando (removendo parsers/LSP não usados)…"
+  else say "Sincronizando LazyVim (plugins, parser, LSP via Mason)… pode demorar na 1ª vez"; fi
+  DEVLANG_MASON="$mason" DEVLANG_TS="$ts" \
+  DEVLANG_PRUNE="$([[ "$prune" == prune ]] && echo 1 || echo 0)" \
+    nvim_run -c "luafile $DEVLANG_HOME/provision.lua" 2>&1 | _filter_provision \
+    || warn "provisionamento terminou com avisos"
   ok "Neovim sincronizado"
+}
+
+# AstroNvim / NvChad / kickstart: instala parser + LSP direto (provision_generic.lua)
+provision_generic() {
+  local ts="$1" mason="$2" prune_ts="${3:-}" prune_mason="${4:-}"
+  [[ -f "$NVIM_CONFIG/init.lua" ]] || { warn "sem $NVIM_CONFIG/init.lua"; return 0; }
+  say "Instalando parser (Treesitter) + LSP (Mason) no ~/.config/$APPNAME…"
+  DEVLANG_TS="$ts" DEVLANG_MASON="$mason" \
+  DEVLANG_PRUNE_TS="$prune_ts" DEVLANG_PRUNE_MASON="$prune_mason" \
+    nvim_run -c "luafile $DEVLANG_HOME/provision_generic.lua" 2>&1 | _filter_provision \
+    || warn "provisionamento terminou com avisos"
+  ok "Neovim sincronizado"
+}
+
+# ---- AstroNvim: imports do astrocommunity em lua/community.lua ------------
+astro_community() { echo "$NVIM_CONFIG/lua/community.lua"; }
+astro_pack_of()   { echo "${ASTRO_MAP[$1]:-$1}"; }
+
+add_astro_pack() {
+  local pack="astrocommunity.pack.$(astro_pack_of "$1")" f; f="$(astro_community)"
+  [[ -f "$f" ]] || { warn "sem $f (AstroNvim incompleto?)"; return 1; }
+  grep -qF "\"$pack\"" "$f" && { ok "astrocommunity já ativo: $pack"; return 0; }
+  say "Ativando pack do astrocommunity: $pack"
+  if grep -q '"AstroNvim/astrocommunity"' "$f"; then
+    sed -i "s#\(\"AstroNvim/astrocommunity\",\)#\1\n  { import = \"$pack\" },#" "$f"
+  else
+    sed -i "s#^return {#return {\n  { import = \"$pack\" },#" "$f"
+  fi
+  ok "pack adicionado"
+}
+remove_astro_pack() {
+  local pack="astrocommunity.pack.$(astro_pack_of "$1")" f; f="$(astro_community)"
+  [[ -f "$f" ]] || return 0
+  grep -qF "\"$pack\"" "$f" || { ok "astrocommunity já ausente: $pack"; return 0; }
+  say "Removendo pack do astrocommunity: $pack"
+  sed -i "\#import = \"$pack\"#d" "$f"
+  ok "pack removido"
+}
+
+# parser/LSP desta linguagem que nenhuma outra ainda-instalada usa
+compute_prune_sets() {   # $1 = id ; seta PRUNE_TS / PRUNE_MASON
+  local rid="$1" keepts=" " keepm=" " other p
+  while read -r other; do
+    [[ -z "$other" || "$other" == "$rid" ]] && continue
+    keepts+=" ${TS_MAP[$other]:-$other} "
+    keepm+=" ${LSP_MAP[$other]:-} "
+  done < <(state_list)
+  PRUNE_TS=""; PRUNE_MASON=""
+  for p in ${TS_MAP[$rid]:-$rid}; do [[ "$keepts" == *" $p "* ]] || PRUNE_TS+=" $p"; done
+  for p in ${LSP_MAP[$rid]:-};     do [[ "$keepm"  == *" $p "* ]] || PRUNE_MASON+=" $p"; done
+}
+
+# --------------------------------------------------------------------------
+require_nvim_config() {
+  [[ "$DISTRO" != none ]] && return 0
+  die "não achei config de Neovim em $NVIM_CONFIG
+     instale um distro:  deveditor           (LazyVim, AstroNvim, NvChad…)
+     ou aponte outro:    devlang --appname <nome> $*"
 }
 
 # --------------------------------------------------------------------------
@@ -195,20 +278,36 @@ sync_nvim() {
 install_lang() {
   local id="$1"
   declare -F "lang_$id" >/dev/null || die "linguagem desconhecida: $id  (veja: devlang --list)"
+  require_nvim_config "$id"
 
-  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; TS_PARSERS=""; POST_FN=""
+  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; POST_FN=""
   "lang_$id"
+  local ts="${TS_MAP[$id]:-$id}" lsp="${LSP_MAP[$id]:-}"
 
-  printf '\n%s\n' "${c_bold}${c_blue}━━ $LABEL ━━${c_reset}"
+  printf '\n%s\n' "${c_bold}${c_blue}━━ $LABEL  →  ${APPNAME} (${DISTRO}) ━━${c_reset}"
   ensure_base "$MISE_TOOLS"
   install_apt  "$APT_PKGS"
   install_mise "$MISE_TOOLS"
-  add_lazy_extra "$LAZY_EXTRA"
-  sync_nvim "$MASON_PKGS" "$TS_PARSERS"
+
+  case "$DISTRO" in
+    lazyvim)
+      add_lazy_extra "$LAZY_EXTRA"
+      provision_lazyvim "$MASON_PKGS" ""
+      ;;
+    astronvim)
+      add_astro_pack "$id"
+      provision_generic "$ts" "$lsp $MASON_PKGS"
+      ;;
+    nvchad|kickstart|unknown)
+      provision_generic "$ts" "$lsp $MASON_PKGS"
+      [[ "$DISTRO" == unknown ]] && warn "config não reconhecida — instalei parser+LSP; habilite o server na sua config"
+      [[ "$DISTRO" == nvchad ]] && warn "NvChad: adicione \"$lsp\" aos servers em lua/configs/lspconfig.lua"
+      ;;
+  esac
+
   [[ -n "$POST_FN" ]] && declare -F "$POST_FN" >/dev/null && { say "Passo final ($POST_FN)…"; "$POST_FN"; }
   state_add "$id"
-
-  printf '%s\n' "${c_green}${c_bold}✓ $LABEL pronto.${c_reset} Abra o nvim: parser, LSP e formatter já configurados."
+  printf '%s\n' "${c_green}${c_bold}✓ $LABEL pronto em ${APPNAME}.${c_reset}"
 }
 
 # --------------------------------------------------------------------------
@@ -217,17 +316,30 @@ install_lang() {
 uninstall_lang() {
   local id="$1"
   declare -F "lang_$id" >/dev/null || die "linguagem desconhecida: $id"
+  require_nvim_config "$id"
 
-  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; TS_PARSERS=""; POST_FN=""
+  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; POST_FN=""
   "lang_$id"
 
-  printf '\n%s\n' "${c_bold}${c_blue}━━ remover: $LABEL ━━${c_reset}"
+  printf '\n%s\n' "${c_bold}${c_blue}━━ remover: $LABEL  ←  ${APPNAME} (${DISTRO}) ━━${c_reset}"
 
-  # 1. tira o extra do LazyVim  2. deixa o provision.lua podar parser/LSP órfãos
-  remove_lazy_extra "$LAZY_EXTRA"
-  sync_nvim "" "" prune
+  local PRUNE_TS="" PRUNE_MASON=""
+  compute_prune_sets "$id"
 
-  # 3. runtime do mise: só remove se o usuário confirmar (pode ser usado fora do nvim)
+  case "$DISTRO" in
+    lazyvim)
+      remove_lazy_extra "$LAZY_EXTRA"
+      provision_lazyvim "" "" prune
+      ;;
+    astronvim)
+      remove_astro_pack "$id"
+      provision_generic "" "" "$PRUNE_TS" "$PRUNE_MASON"
+      ;;
+    nvchad|kickstart|unknown)
+      provision_generic "" "" "$PRUNE_TS" "$PRUNE_MASON"
+      ;;
+  esac
+
   if [[ -n "${MISE_TOOLS// }" ]] && have mise; then
     for tool in $MISE_TOOLS; do
       local name="${tool%@*}"
@@ -241,12 +353,10 @@ uninstall_lang() {
       fi
     done
   fi
-
-  # pacotes apt (build-essential, headers…) NÃO são removidos: podem ser compartilhados
-  [[ -n "${APT_PKGS// }" ]] && warn "pacotes apt de '$LABEL' mantidos (remova à mão se quiser): $APT_PKGS"
+  [[ -n "${APT_PKGS// }" ]] && warn "pacotes apt de '$LABEL' mantidos: $APT_PKGS"
 
   state_del "$id"
-  printf '%s\n' "${c_green}${c_bold}✓ $LABEL removido do LazyVim.${c_reset}"
+  printf '%s\n' "${c_green}${c_bold}✓ $LABEL removido de ${APPNAME}.${c_reset}"
 }
 
 # --------------------------------------------------------------------------
@@ -271,29 +381,35 @@ menu_rows() {
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
-usage() { sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
-  local action="" args=()
+  local action="" args=() want_list=0
   while (($#)); do
     case "$1" in
       -h|--help)               usage; exit 0 ;;
-      -l|--list)
-        menu_rows all | while IFS=$'\t' read -r id flag disp; do
-          [[ "$flag" == on ]] && m="${c_green}✓${c_reset}" || m=" "
-          printf '  %s %-12s %s\n' "$m" "$id" "${disp#* }"
-        done
-        exit 0 ;;
+      -l|--list)               want_list=1 ;;
       -r|--remove|--uninstall) action="remove" ;;
       -i|--install)            action="install" ;;
       -y|--yes)                ASSUME_YES=1 ;;
       --gui)                   FORCE_ZENITY=1 ;;
+      --appname)               shift; [[ -n "${1:-}" ]] || die "--appname requer um nome"; set_target "$1" ;;
+      --appname=*)             set_target "${1#*=}" ;;
       --) shift; args+=("$@"); break ;;
       -*) die "opção desconhecida: $1" ;;
       *)  args+=("$1") ;;
     esac
     shift
   done
+
+  if ((want_list)); then
+    printf '%salvo:%s %s (%s)\n' "$c_bold" "$c_reset" "$APPNAME" "$DISTRO"
+    menu_rows all | while IFS=$'\t' read -r id flag disp; do
+      [[ "$flag" == on ]] && m="${c_green}✓${c_reset}" || m=" "
+      printf '  %s %-12s %s\n' "$m" "$id" "${disp#* }"
+    done
+    exit 0
+  fi
 
   # alvos passados na linha de comando
   if ((${#args[@]})); then
@@ -319,18 +435,18 @@ main() {
   local selected=()
   case "$action" in
     remove)
-      mapfile -t selected < <(menu_rows installed | choose "Linguagens para REMOVER do LazyVim")
+      mapfile -t selected < <(menu_rows installed | choose "Linguagens para REMOVER de $APPNAME ($DISTRO)")
       ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
       for id in "${selected[@]}"; do id="${id//[[:space:]]/}"; [[ -n "$id" ]] && uninstall_lang "$id"; done
       ;;
     install)
-      mapfile -t selected < <(menu_rows available | choose "Linguagens para INSTALAR no LazyVim")
+      mapfile -t selected < <(menu_rows available | choose "Linguagens para INSTALAR em $APPNAME ($DISTRO)")
       ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
       for id in "${selected[@]}"; do id="${id//[[:space:]]/}"; [[ -n "$id" ]] && install_lang "$id"; done
       ;;
     *)
       # menu unificado: marcar uma instalada = remover; marcar uma disponível = instalar
-      mapfile -t selected < <(menu_rows all | choose "● = instalada (marcar remove) · ○ = disponível (marcar instala)")
+      mapfile -t selected < <(menu_rows all | choose "$APPNAME ($DISTRO) · ● instalada (marcar remove) · ○ disponível (marcar instala)")
       ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
       for id in "${selected[@]}"; do
         id="${id//[[:space:]]/}"; [[ -z "$id" ]] && continue

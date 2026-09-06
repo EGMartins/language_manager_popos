@@ -12,8 +12,9 @@ die()  { printf '%s\n' "${c_red}${c_bold}erro:${c_reset} $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # ---- estado (arquivo de linhas; $1 = caminho, $2 = item) -----------------
-sf_has() { [[ -f "$1" ]] && grep -qxF "$2" "$1"; }
-sf_add() { mkdir -p "$(dirname "$1")"; sf_has "$1" "$2" || printf '%s\n' "$2" >> "$1"; }
+sf_has()  { [[ -f "$1" ]] && grep -qxF "$2" "$1"; }
+sf_list() { [[ -f "$1" ]] && cat "$1" || true; }
+sf_add()  { mkdir -p "$(dirname "$1")"; sf_has "$1" "$2" || printf '%s\n' "$2" >> "$1"; }
 sf_del() {
   [[ -f "$1" ]] || return 0
   grep -vxF "$2" "$1" > "$1.tmp" 2>/dev/null || : > "$1.tmp"
@@ -21,13 +22,13 @@ sf_del() {
 }
 
 # ---- confirmação -------------------------------------------------------
-# ASSUME_YES=1 -> sempre sim.  Sem terminal e sem ASSUME_YES -> não.
+# ASSUME_YES=1 -> sempre sim.  Sem terminal utilizável e sem ASSUME_YES -> não.
 confirm() {
   local q="$1" a
   [[ "${ASSUME_YES:-0}" == 1 ]] && return 0
-  [[ -t 2 || -e /dev/tty ]] || return 1
+  { : </dev/tty; } 2>/dev/null || return 1
   printf '%s%s%s [s/N] ' "${c_yellow}" "$q" "${c_reset}" >&2
-  read -r a </dev/tty || return 1
+  read -r a </dev/tty 2>/dev/null || return 1
   [[ "$a" =~ ^[sSyY]$ ]]
 }
 
