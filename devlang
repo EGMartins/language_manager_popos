@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+#
+# devlang — instala uma linguagem + suporte no LazyVim (parser, LSP, formatter…)
+#           no estilo dos scripts omarchy-install-dev-* do Omarchy.
+#
+# Uso:
+#   devlang                 abre o menu (fzf/gum/zenity/select, o que existir)
+#   devlang go rust python  instala direto essas linguagens
+#   devlang --list          lista os ids disponíveis
+#   devlang --gui           força o menu gráfico (zenity)
+#
+set -euo pipefail
+
+# resolve o diretório real do script (mesmo chamado via symlink em ~/.local/bin)
+_self="$(readlink -f "${BASH_SOURCE[0]}")"
+DEVLANG_HOME="${DEVLANG_HOME:-$(dirname "$_self")}"
+NVIM_CONFIG="${NVIM_CONFIG:-$HOME/.config/nvim}"
+LAZYVIM_JSON="$NVIM_CONFIG/lazyvim.json"
+
+# shellcheck source=/dev/null
+source "$DEVLANG_HOME/registry.sh"
+
+c_reset=$'\e[0m'; c_bold=$'\e[1m'; c_blue=$'\e[34m'; c_green=$'\e[32m'; c_yellow=$'\e[33m'; c_red=$'\e[31m'
+say()  { printf '%s\n' "${c_blue}${c_bold}::${c_reset} $*"; }
+ok()   { printf '%s\n' "${c_green}  ✓${c_reset} $*"; }
+warn() { printf '%s\n' "${c_yellow}  !${c_reset} $*" >&2; }
+die()  { printf '%s\n' "${c_red}${c_bold}erro:${c_reset} $*" >&2; exit 1; }
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# --------------------------------------------------------------------------
+# dependências base: mise (runtimes) + git/curl/build-essential
+# --------------------------------------------------------------------------
+ensure_base() {
+  local want_mise="${1:-}"
+  local need=()
+  have curl || need+=(curl)
+  have git  || need+=(git)
+  have unzip || need+=(unzip)
+  dpkg -s build-essential >/dev/null 2>&1 || need+=(build-essential)
+  if ((${#need[@]})); then
+    say "Instalando dependências base: ${need[*]}"
+    sudo apt-get update -qq
+    sudo apt-get install -y "${need[@]}"
+  fi
+
+  if [[ -n "${want_mise// }" ]] && ! have mise; then
+    say "Instalando mise (gerenciador de runtimes)"
+    curl -fsSL https://mise.run | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    hint_shell_activation
+  fi
+}
+
+hint_shell_activation() {
+  local line
+  case "${SHELL##*/}" in
+    zsh)  line='eval "$(~/.local/bin/mise activate zsh)"';  rc="$HOME/.zshrc" ;;
+    bash) line='eval "$(~/.local/bin/mise activate bash)"'; rc="$HOME/.bashrc" ;;
+    fish) line='~/.local/bin/mise activate fish | source';  rc="$HOME/.config/fish/config.fish" ;;
+    *) return 0 ;;
+  esac
+  if [[ -f "$rc" ]] && ! grep -qF 'mise activate' "$rc"; then
+    printf '\n# mise (devlang)\n%s\n' "$line" >> "$rc"
+    ok "Ativação do mise adicionada em $rc (reabra o terminal depois)"
+  fi
+}
+
+# --------------------------------------------------------------------------
+# apt / mise / lazyvim.json
+# --------------------------------------------------------------------------
+install_apt() {
+  [[ -z "${1// }" ]] && return 0
+  local pending=()
+  for p in $1; do dpkg -s "$p" >/dev/null 2>&1 || pending+=("$p"); done
+  ((${#pending[@]})) || { ok "apt: nada a instalar"; return 0; }
+  say "apt: ${pending[*]}"
+  sudo apt-get update -qq
+  sudo apt-get install -y "${pending[@]}"
+}
+
+install_mise() {
+  [[ -z "${1// }" ]] && return 0
+  have mise || { export PATH="$HOME/.local/bin:$PATH"; }
+  for tool in $1; do
+    say "mise use -g $tool"
+    mise use -g "$tool"
+    ok "$tool -> $(mise which "${tool%@*}" 2>/dev/null || echo instalado)"
+  done
+}
+
+# adiciona um extra ao array "extras" de lazyvim.json sem duplicar
+add_lazy_extra() {
+  local extra="$1"
+  [[ -z "$extra" ]] && return 0
+  [[ -f "$LAZYVIM_JSON" ]] || echo '{ "extras": [], "version": 8 }' > "$LAZYVIM_JSON"
+
+  if grep -qF "\"$extra\"" "$LAZYVIM_JSON"; then
+    ok "LazyVim extra já ativo: $extra"
+    return 0
+  fi
+
+  say "Ativando extra do LazyVim: $extra"
+  if have jq; then
+    tmp=$(mktemp)
+    jq --arg e "$extra" '.extras = ((.extras // []) + [$e] | unique)' "$LAZYVIM_JSON" > "$tmp"
+    mv "$tmp" "$LAZYVIM_JSON"
+  else
+    # fallback sem jq: nvim edita o próprio json
+    nvim --headless -u NONE -c "
+      lua local f='$LAZYVIM_JSON'; local d=vim.json.decode(table.concat(vim.fn.readfile(f),'\n'))
+      d.extras = d.extras or {}
+      local seen=false; for _,v in ipairs(d.extras) do if v=='$extra' then seen=true end end
+      if not seen then table.insert(d.extras, '$extra') end
+      vim.fn.writefile(vim.split(vim.json.encode(d),'\n'), f)
+    " -c "qa" 2>/dev/null
+  fi
+  ok "extra adicionado"
+}
+
+# --------------------------------------------------------------------------
+# sincronização do Neovim (headless)
+# --------------------------------------------------------------------------
+sync_nvim() {
+  local mason_extra="$1"
+  say "Sincronizando plugins do LazyVim (Lazy sync)…"
+  nvim --headless "+Lazy! sync" +qa 2>&1 | sed 's/^/    /' || warn "Lazy sync retornou aviso"
+
+  say "Atualizando parsers do Treesitter…"
+  nvim --headless "+TSUpdateSync" +qa 2>&1 | tail -n 3 | sed 's/^/    /' || true
+
+  say "Instalando servidores/ferramentas via Mason…"
+  # o LazyVim instala o ensure_installed no startup; damos um empurrão + extras
+  nvim --headless \
+    -c "lua vim.defer_fn(function() end, 100)" \
+    -c "MasonUpdate" +qa 2>&1 | tail -n 3 | sed 's/^/    /' || true
+  if [[ -n "${mason_extra// }" ]]; then
+    nvim --headless -c "MasonInstall $mason_extra" -c "qa" 2>&1 | tail -n 3 | sed 's/^/    /' || true
+  fi
+  # segundo start: dá tempo do mason-lspconfig baixar o ensure_installed do extra
+  timeout 180 nvim --headless -c "sleep 60" -c "qa" >/dev/null 2>&1 || true
+  ok "Neovim sincronizado"
+}
+
+# --------------------------------------------------------------------------
+# instala UMA linguagem
+# --------------------------------------------------------------------------
+install_lang() {
+  local id="$1"
+  declare -F "lang_$id" >/dev/null || die "linguagem desconhecida: $id  (veja: devlang --list)"
+
+  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; POST_FN=""
+  "lang_$id"
+
+  printf '\n%s\n' "${c_bold}${c_blue}━━ $LABEL ━━${c_reset}"
+  ensure_base "$MISE_TOOLS"
+  install_apt  "$APT_PKGS"
+  install_mise "$MISE_TOOLS"
+  add_lazy_extra "$LAZY_EXTRA"
+  sync_nvim "$MASON_PKGS"
+  [[ -n "$POST_FN" ]] && declare -F "$POST_FN" >/dev/null && { say "Passo final ($POST_FN)…"; "$POST_FN"; }
+
+  printf '%s\n' "${c_green}${c_bold}✓ $LABEL pronto.${c_reset} Abra o nvim: parser, LSP e formatter já configurados."
+}
+
+# --------------------------------------------------------------------------
+# menu
+# --------------------------------------------------------------------------
+menu_lines() {   # "id\tLabel"
+  for id in "${LANG_IDS[@]}"; do
+    LABEL=""; "lang_$id"
+    printf '%s\t%s\n' "$id" "$LABEL"
+  done
+}
+
+choose_tui() {
+  local lines; lines="$(menu_lines)"
+  if have gum; then
+    gum choose --no-limit --header "Linguagens para instalar (espaço = marcar, enter = ok)" \
+      < <(printf '%s\n' "$lines" | cut -f2-) \
+      | while read -r lbl; do printf '%s\n' "$lines" | awk -F'\t' -v l="$lbl" '$2==l{print $1}'; done
+  elif have fzf; then
+    printf '%s\n' "$lines" | fzf --multi --with-nth=2.. --delimiter='\t' \
+      --prompt="linguagem> " --header="TAB = marcar várias, ENTER = instalar" \
+      | cut -f1
+  else
+    choose_zenity
+  fi
+}
+
+choose_zenity() {
+  have zenity || die "sem fzf/gum/zenity; rode: devlang <id> [id…]"
+  local args=() lines; lines="$(menu_lines)"
+  while IFS=$'\t' read -r id lbl; do args+=(FALSE "$id" "$lbl"); done <<< "$lines"
+  zenity --list --checklist --width=460 --height=560 \
+    --title="devlang" --text="Escolha as linguagens para instalar no LazyVim" \
+    --column="" --column="id" --column="Linguagem" --hide-column=2 --print-column=2 \
+    "${args[@]}" 2>/dev/null | tr '|' '\n'
+}
+
+# --------------------------------------------------------------------------
+# main
+# --------------------------------------------------------------------------
+main() {
+  case "${1:-}" in
+    --list|-l) menu_lines | awk -F'\t' '{printf "  %-12s %s\n",$1,$2}'; exit 0 ;;
+    --help|-h) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  esac
+
+  local selected=()
+  if (($#)); then
+    if [[ "$1" == "--gui" ]]; then mapfile -t selected < <(choose_zenity)
+    else selected=("$@"); fi
+  elif [[ -t 0 && -t 1 ]]; then
+    mapfile -t selected < <(choose_tui)
+  else
+    mapfile -t selected < <(choose_zenity)
+  fi
+
+  ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
+
+  say "Selecionadas: ${selected[*]}"
+  for id in "${selected[@]}"; do
+    id="${id//[[:space:]]/}"
+    [[ -z "$id" ]] && continue
+    install_lang "$id"
+  done
+
+  printf '\n%s\n' "${c_green}${c_bold}Tudo pronto.${c_reset}"
+  have zenity && [[ ! -t 1 ]] && zenity --info --width=320 \
+    --title="devlang" --text="Instalação concluída:\n${selected[*]}" 2>/dev/null || true
+}
+
+main "$@"

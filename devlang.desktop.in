@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Dev Languages
+Comment=Instala linguagens e configura o LazyVim (parser, LSP, formatter)
+Exec=env PATH=@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin @DEVLANG@
+Icon=applications-development
+Terminal=true
+Categories=Development;Utility;
+Keywords=language;linguagem;lsp;neovim;lazyvim;mise;install;
