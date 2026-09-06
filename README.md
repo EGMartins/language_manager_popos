@@ -36,7 +36,9 @@ Ou clique em **Dev Languages** no menu de aplicativos do Pop!_OS.
 2. `apt` — toolchain de build específico (ex.: headers para compilar Ruby/Python)
 3. `mise use -g <tool>` — o runtime (Go, Node, Python…), global
 4. adiciona `lazyvim.plugins.extras.lang.<x>` em `~/.config/nvim/lazyvim.json`
-5. `nvim --headless` — `Lazy! sync`, `TSUpdateSync`, `Mason`
+5. roda `provision.lua` em `nvim --headless`: `Lazy sync`, instala os parsers do
+   Treesitter e os LSP servers/formatters via Mason (síncrono — carrega os plugins
+   lazy-loaded antes de instalar)
 6. passo final opcional (ex.: `rustup component add rust-analyzer`)
 
 ## Estrutura
@@ -45,6 +47,7 @@ Ou clique em **Dev Languages** no menu de aplicativos do Pop!_OS.
 |---|---|
 | `devlang` | script principal (menu + instalação) |
 | `registry.sh` | catálogo de linguagens — **edite aqui para adicionar/remover** |
+| `provision.lua` | roda no `nvim --headless`: carrega os plugins e instala parser/LSP |
 | `install.sh` | cria symlink + entrada de menu |
 | `devlang.desktop.in` | template da entrada do menu de aplicativos |
 

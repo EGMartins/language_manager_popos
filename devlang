@@ -122,23 +122,24 @@ add_lazy_extra() {
 # sincronização do Neovim (headless)
 # --------------------------------------------------------------------------
 sync_nvim() {
-  local mason_extra="$1"
-  say "Sincronizando plugins do LazyVim (Lazy sync)…"
-  nvim --headless "+Lazy! sync" +qa 2>&1 | sed 's/^/    /' || warn "Lazy sync retornou aviso"
+  local mason_extra="$1" ts_extra="$2"
+  local init="$NVIM_CONFIG/init.lua"
 
-  say "Atualizando parsers do Treesitter…"
-  nvim --headless "+TSUpdateSync" +qa 2>&1 | tail -n 3 | sed 's/^/    /' || true
-
-  say "Instalando servidores/ferramentas via Mason…"
-  # o LazyVim instala o ensure_installed no startup; damos um empurrão + extras
-  nvim --headless \
-    -c "lua vim.defer_fn(function() end, 100)" \
-    -c "MasonUpdate" +qa 2>&1 | tail -n 3 | sed 's/^/    /' || true
-  if [[ -n "${mason_extra// }" ]]; then
-    nvim --headless -c "MasonInstall $mason_extra" -c "qa" 2>&1 | tail -n 3 | sed 's/^/    /' || true
+  if [[ ! -f "$init" ]]; then
+    warn "sem $init — pulei a sincronização do Neovim"
+    return 0
   fi
-  # segundo start: dá tempo do mason-lspconfig baixar o ensure_installed do extra
-  timeout 180 nvim --headless -c "sleep 60" -c "qa" >/dev/null 2>&1 || true
+
+  say "Sincronizando LazyVim (plugins, parsers do Treesitter, LSP via Mason)…"
+  say "  isso pode levar alguns minutos na 1ª vez; não feche."
+
+  # provision.lua carrega os plugins lazy-loaded ANTES de instalar parser/LSP
+  # (em --headless o LazyVim não carrega treesitter/mason sozinho)
+  DEVLANG_MASON="$mason_extra" DEVLANG_TS="$ts_extra" timeout 1200 \
+    nvim --headless -u "$init" -c "luafile $DEVLANG_HOME/provision.lua" 2>&1 \
+    | grep -E '\[provision\]|error|Error|warning' | sed 's/^/    /' \
+    || warn "provisionamento terminou com avisos (veja acima)"
+
   ok "Neovim sincronizado"
 }
 
@@ -149,7 +150,7 @@ install_lang() {
   local id="$1"
   declare -F "lang_$id" >/dev/null || die "linguagem desconhecida: $id  (veja: devlang --list)"
 
-  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; POST_FN=""
+  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; TS_PARSERS=""; POST_FN=""
   "lang_$id"
 
   printf '\n%s\n' "${c_bold}${c_blue}━━ $LABEL ━━${c_reset}"
@@ -157,7 +158,7 @@ install_lang() {
   install_apt  "$APT_PKGS"
   install_mise "$MISE_TOOLS"
   add_lazy_extra "$LAZY_EXTRA"
-  sync_nvim "$MASON_PKGS"
+  sync_nvim "$MASON_PKGS" "$TS_PARSERS"
   [[ -n "$POST_FN" ]] && declare -F "$POST_FN" >/dev/null && { say "Passo final ($POST_FN)…"; "$POST_FN"; }
 
   printf '%s\n' "${c_green}${c_bold}✓ $LABEL pronto.${c_reset} Abra o nvim: parser, LSP e formatter já configurados."

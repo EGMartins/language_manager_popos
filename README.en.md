@@ -36,7 +36,9 @@ Or click **Dev Languages** in the Pop!_OS application menu.
 2. `apt` — language-specific build toolchain (e.g. headers to compile Ruby/Python)
 3. `mise use -g <tool>` — the runtime (Go, Node, Python…), global
 4. adds `lazyvim.plugins.extras.lang.<x>` to `~/.config/nvim/lazyvim.json`
-5. `nvim --headless` — `Lazy! sync`, `TSUpdateSync`, `Mason`
+5. runs `provision.lua` under `nvim --headless`: `Lazy sync`, installs Treesitter
+   parsers and LSP servers/formatters via Mason (synchronously — it loads the
+   lazy-loaded plugins before installing)
 6. optional final step (e.g. `rustup component add rust-analyzer`)
 
 ## Layout
@@ -45,6 +47,7 @@ Or click **Dev Languages** in the Pop!_OS application menu.
 |---|---|
 | `devlang` | main script (menu + install) |
 | `registry.sh` | language catalog — **edit here to add/remove** |
+| `provision.lua` | runs under `nvim --headless`: loads plugins and installs parser/LSP |
 | `install.sh` | creates symlink + menu entry |
 | `devlang.desktop.in` | template for the application-menu entry |
 
