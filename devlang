@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 #
-# devlang — instala uma linguagem + suporte no LazyVim (parser, LSP, formatter…)
-#           no estilo dos scripts omarchy-install-dev-* do Omarchy.
+# devlang — instala/remove uma linguagem + suporte no LazyVim (parser, LSP,
+#           formatter…) no estilo dos scripts omarchy-install-dev-* do Omarchy.
 #
 # Uso:
-#   devlang                 abre o menu (fzf/gum/zenity/select, o que existir)
-#   devlang go rust python  instala direto essas linguagens
-#   devlang --list          lista os ids disponíveis
-#   devlang --gui           força o menu gráfico (zenity)
+#   devlang                    menu unificado (○ instala · ● remove)
+#   devlang go rust python     instala essas linguagens
+#   devlang -r go              remove a linguagem (extra do LazyVim + parser/LSP órfãos)
+#   devlang --remove           menu só com as linguagens instaladas
+#   devlang --list             lista os ids e o que está instalado
+#   devlang --gui              força o menu gráfico (zenity)
+#
+#   Menus: usa fzf ou gum se instalados, senão zenity, senão lista numerada.
 #
 set -euo pipefail
 
@@ -29,10 +33,34 @@ die()  { printf '%s\n' "${c_red}${c_bold}erro:${c_reset} $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # --------------------------------------------------------------------------
+# estado: quais linguagens foram instaladas pelo devlang
+# --------------------------------------------------------------------------
+STATE_DIR="${DEVLANG_STATE:-$HOME/.local/state/devlang}"
+STATE_FILE="$STATE_DIR/installed"
+
+state_has() { [[ -f "$STATE_FILE" ]] && grep -qxF "$1" "$STATE_FILE"; }
+state_add() { mkdir -p "$STATE_DIR"; state_has "$1" || printf '%s\n' "$1" >> "$STATE_FILE"; }
+state_del() {
+  [[ -f "$STATE_FILE" ]] || return 0
+  grep -vxF "$1" "$STATE_FILE" > "$STATE_FILE.tmp" 2>/dev/null || : > "$STATE_FILE.tmp"
+  mv "$STATE_FILE.tmp" "$STATE_FILE"
+}
+
+# instalada = está no state file OU o extra do LazyVim correspondente está ativo
+is_installed() {
+  state_has "$1" && return 0
+  local extra=""
+  LABEL=""; LAZY_EXTRA=""; "lang_$1"; extra="$LAZY_EXTRA"
+  [[ -n "$extra" ]] && grep -qF "\"$extra\"" "$LAZYVIM_JSON" 2>/dev/null
+}
+
+# --------------------------------------------------------------------------
 # dependências base: mise (runtimes) + git/curl/build-essential
 # --------------------------------------------------------------------------
 ensure_base() {
   local want_mise="${1:-}"
+  # mise costuma ficar em ~/.local/bin, que pode não estar no PATH de um shell não-interativo
+  [[ -x "$HOME/.local/bin/mise" ]] && case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
   local need=()
   have curl || need+=(curl)
   have git  || need+=(git)
@@ -118,11 +146,33 @@ add_lazy_extra() {
   ok "extra adicionado"
 }
 
+# remove um extra do array "extras" de lazyvim.json
+remove_lazy_extra() {
+  local extra="$1"
+  [[ -z "$extra" ]] && return 0
+  [[ -f "$LAZYVIM_JSON" ]] || return 0
+  grep -qF "\"$extra\"" "$LAZYVIM_JSON" || { ok "extra do LazyVim já ausente: $extra"; return 0; }
+
+  say "Removendo extra do LazyVim: $extra"
+  if have jq; then
+    local tmp; tmp=$(mktemp)
+    jq --arg e "$extra" '.extras = ((.extras // []) - [$e])' "$LAZYVIM_JSON" > "$tmp"
+    mv "$tmp" "$LAZYVIM_JSON"
+  else
+    nvim --headless -u NONE -c "
+      lua local f='$LAZYVIM_JSON'; local d=vim.json.decode(table.concat(vim.fn.readfile(f),'\n'))
+      d.extras = vim.tbl_filter(function(v) return v ~= '$extra' end, d.extras or {})
+      vim.fn.writefile(vim.split(vim.json.encode(d),'\n'), f)
+    " -c "qa" 2>/dev/null
+  fi
+  ok "extra removido"
+}
+
 # --------------------------------------------------------------------------
 # sincronização do Neovim (headless)
 # --------------------------------------------------------------------------
 sync_nvim() {
-  local mason_extra="$1" ts_extra="$2"
+  local mason_extra="$1" ts_extra="$2" prune="${3:-}"
   local init="$NVIM_CONFIG/init.lua"
 
   if [[ ! -f "$init" ]]; then
@@ -130,12 +180,17 @@ sync_nvim() {
     return 0
   fi
 
-  say "Sincronizando LazyVim (plugins, parsers do Treesitter, LSP via Mason)…"
-  say "  isso pode levar alguns minutos na 1ª vez; não feche."
+  if [[ "$prune" == "prune" ]]; then
+    say "Sincronizando LazyVim (removendo parsers/LSP não usados)…"
+  else
+    say "Sincronizando LazyVim (plugins, parsers do Treesitter, LSP via Mason)…"
+    say "  isso pode levar alguns minutos na 1ª vez; não feche."
+  fi
 
-  # provision.lua carrega os plugins lazy-loaded ANTES de instalar parser/LSP
+  # provision.lua carrega os plugins lazy-loaded ANTES de instalar/remover parser/LSP
   # (em --headless o LazyVim não carrega treesitter/mason sozinho)
-  DEVLANG_MASON="$mason_extra" DEVLANG_TS="$ts_extra" timeout 1200 \
+  DEVLANG_MASON="$mason_extra" DEVLANG_TS="$ts_extra" \
+  DEVLANG_PRUNE="$([[ "$prune" == "prune" ]] && echo 1 || echo 0)" timeout 1200 \
     nvim --headless -u "$init" -c "luafile $DEVLANG_HOME/provision.lua" 2>&1 \
     | grep -E '\[provision\]|error|Error|warning' | sed 's/^/    /' \
     || warn "provisionamento terminou com avisos (veja acima)"
@@ -160,76 +215,182 @@ install_lang() {
   add_lazy_extra "$LAZY_EXTRA"
   sync_nvim "$MASON_PKGS" "$TS_PARSERS"
   [[ -n "$POST_FN" ]] && declare -F "$POST_FN" >/dev/null && { say "Passo final ($POST_FN)…"; "$POST_FN"; }
+  state_add "$id"
 
   printf '%s\n' "${c_green}${c_bold}✓ $LABEL pronto.${c_reset} Abra o nvim: parser, LSP e formatter já configurados."
 }
 
 # --------------------------------------------------------------------------
+# desinstala UMA linguagem
+# --------------------------------------------------------------------------
+uninstall_lang() {
+  local id="$1"
+  declare -F "lang_$id" >/dev/null || die "linguagem desconhecida: $id"
+
+  LABEL=""; MISE_TOOLS=""; APT_PKGS=""; LAZY_EXTRA=""; MASON_PKGS=""; TS_PARSERS=""; POST_FN=""
+  "lang_$id"
+
+  printf '\n%s\n' "${c_bold}${c_blue}━━ remover: $LABEL ━━${c_reset}"
+
+  # 1. tira o extra do LazyVim  2. deixa o provision.lua podar parser/LSP órfãos
+  remove_lazy_extra "$LAZY_EXTRA"
+  sync_nvim "" "" prune
+
+  # 3. runtime do mise: só remove se o usuário confirmar (pode ser usado fora do nvim)
+  if [[ -n "${MISE_TOOLS// }" ]] && have mise; then
+    for tool in $MISE_TOOLS; do
+      local name="${tool%@*}"
+      mise which "$name" >/dev/null 2>&1 || continue
+      if confirm "Remover o runtime '$name' do mise também?"; then
+        mise use -g --rm "$name" 2>/dev/null || true
+        mise uninstall "$name" 2>/dev/null || true
+        ok "mise: $name removido"
+      else
+        ok "mise: $name mantido"
+      fi
+    done
+  fi
+
+  # pacotes apt (build-essential, headers…) NÃO são removidos: podem ser compartilhados
+  [[ -n "${APT_PKGS// }" ]] && warn "pacotes apt de '$LABEL' mantidos (remova à mão se quiser): $APT_PKGS"
+
+  state_del "$id"
+  printf '%s\n' "${c_green}${c_bold}✓ $LABEL removido do LazyVim.${c_reset}"
+}
+
+confirm() {  # confirm "pergunta?"  -> 0/1 ; assume "não" fora de tty
+  local q="$1" a
+  [[ -t 0 ]] || return 1
+  read -r -p "$(printf '%s%s%s [s/N] ' "${c_yellow}" "$q" "${c_reset}")" a || true
+  [[ "$a" =~ ^[sSyY]$ ]]
+}
+
+# --------------------------------------------------------------------------
 # menu
 # --------------------------------------------------------------------------
-menu_lines() {   # "id\tLabel"
+# emite "id<TAB>on|off<TAB>display"    filtro: all | installed | available
+menu_rows() {
+  local filter="${1:-all}" id lbl flag
   for id in "${LANG_IDS[@]}"; do
-    LABEL=""; "lang_$id"
-    printf '%s\t%s\n' "$id" "$LABEL"
+    LABEL=""; "lang_$id"; lbl="$LABEL"
+    if is_installed "$id"; then flag=on; else flag=off; fi
+    [[ "$filter" == installed && "$flag" == off ]] && continue
+    [[ "$filter" == available && "$flag" == on  ]] && continue
+    if [[ "$flag" == on ]]; then
+      printf '%s\t%s\t● %s  (instalada)\n' "$id" "$flag" "$lbl"
+    else
+      printf '%s\t%s\t○ %s\n' "$id" "$flag" "$lbl"
+    fi
   done
 }
 
-choose_tui() {
-  local lines; lines="$(menu_lines)"
-  if have gum; then
-    gum choose --no-limit --header "Linguagens para instalar (espaço = marcar, enter = ok)" \
-      < <(printf '%s\n' "$lines" | cut -f2-) \
-      | while read -r lbl; do printf '%s\n' "$lines" | awk -F'\t' -v l="$lbl" '$2==l{print $1}'; done
-  elif have fzf; then
-    printf '%s\n' "$lines" | fzf --multi --with-nth=2.. --delimiter='\t' \
-      --prompt="linguagem> " --header="TAB = marcar várias, ENTER = instalar" \
-      | cut -f1
-  else
-    choose_zenity
-  fi
-}
+# lê rows no stdin, escreve ids escolhidos no stdout.  $1 = cabeçalho
+choose() {
+  local header="$1" rows; rows="$(cat)"
+  [[ -z "$rows" ]] && return 0
 
-choose_zenity() {
-  have zenity || die "sem fzf/gum/zenity; rode: devlang <id> [id…]"
-  local args=() lines; lines="$(menu_lines)"
-  while IFS=$'\t' read -r id lbl; do args+=(FALSE "$id" "$lbl"); done <<< "$lines"
-  zenity --list --checklist --width=460 --height=560 \
-    --title="devlang" --text="Escolha as linguagens para instalar no LazyVim" \
-    --column="" --column="id" --column="Linguagem" --hide-column=2 --print-column=2 \
-    "${args[@]}" 2>/dev/null | tr '|' '\n'
+  if [[ -t 0 && -t 1 ]] && have fzf; then
+    printf '%s\n' "$rows" | fzf --multi --delimiter='\t' --with-nth=3 --nth=3 \
+      --prompt="devlang> " --header="$header  ·  TAB marca, ENTER confirma" | cut -f1
+  elif [[ -t 0 && -t 1 ]] && have gum; then
+    local sel; sel="$(printf '%s\n' "$rows" | cut -f3 | gum choose --no-limit --header "$header")"
+    local d
+    while IFS= read -r d; do
+      [[ -z "$d" ]] && continue
+      printf '%s\n' "$rows" | awk -F'\t' -v d="$d" '$3==d{print $1}'
+    done <<< "$sel"
+  elif have zenity; then
+    local args=() id flag disp
+    while IFS=$'\t' read -r id flag disp; do args+=(FALSE "$id" "$disp"); done <<< "$rows"
+    zenity --list --checklist --width=480 --height=600 \
+      --title="devlang" --text="$header" \
+      --column="" --column="id" --column="Linguagem" --hide-column=2 --print-column=2 \
+      "${args[@]}" 2>/dev/null | tr '|' '\n'
+  elif [[ -t 0 ]]; then
+    local ids=() disps=() id flag disp i
+    while IFS=$'\t' read -r id flag disp; do ids+=("$id"); disps+=("$disp"); done <<< "$rows"
+    printf '%s\n' "$header" >&2
+    for i in "${!ids[@]}"; do printf '  %2d) %s\n' "$((i + 1))" "${disps[$i]}" >&2; done
+    printf 'números (separados por espaço): ' >&2
+    local nums n; read -r nums || true
+    for n in $nums; do [[ "$n" =~ ^[0-9]+$ ]] && printf '%s\n' "${ids[$((n - 1))]:-}"; done
+  else
+    die "sem fzf/gum/zenity e sem terminal interativo; use: devlang <id>…"
+  fi
 }
 
 # --------------------------------------------------------------------------
 # main
 # --------------------------------------------------------------------------
+usage() { sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'; }
+
 main() {
-  case "${1:-}" in
-    --list|-l) menu_lines | awk -F'\t' '{printf "  %-12s %s\n",$1,$2}'; exit 0 ;;
-    --help|-h) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-  esac
-
-  local selected=()
-  if (($#)); then
-    if [[ "$1" == "--gui" ]]; then mapfile -t selected < <(choose_zenity)
-    else selected=("$@"); fi
-  elif [[ -t 0 && -t 1 ]]; then
-    mapfile -t selected < <(choose_tui)
-  else
-    mapfile -t selected < <(choose_zenity)
-  fi
-
-  ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
-
-  say "Selecionadas: ${selected[*]}"
-  for id in "${selected[@]}"; do
-    id="${id//[[:space:]]/}"
-    [[ -z "$id" ]] && continue
-    install_lang "$id"
+  local action="" gui=0 args=()
+  while (($#)); do
+    case "$1" in
+      -h|--help)               usage; exit 0 ;;
+      -l|--list)
+        menu_rows all | while IFS=$'\t' read -r id flag disp; do
+          [[ "$flag" == on ]] && m="${c_green}✓${c_reset}" || m=" "
+          printf '  %s %-12s %s\n' "$m" "$id" "${disp#* }"
+        done
+        exit 0 ;;
+      -r|--remove|--uninstall) action="remove" ;;
+      -i|--install)            action="install" ;;
+      --gui)                   gui=1 ;;
+      --) shift; args+=("$@"); break ;;
+      -*) die "opção desconhecida: $1" ;;
+      *)  args+=("$1") ;;
+    esac
+    shift
   done
 
-  printf '\n%s\n' "${c_green}${c_bold}Tudo pronto.${c_reset}"
+  # alvos passados na linha de comando
+  if ((${#args[@]})); then
+    for id in "${args[@]}"; do
+      if [[ "$action" == remove ]]; then uninstall_lang "$id"; else install_lang "$id"; fi
+    done
+    printf '\n%s\n' "${c_green}${c_bold}Concluído.${c_reset}"
+    return 0
+  fi
+
+  # menu gráfico sem terminal: pergunta a ação primeiro
+  if [[ $gui == 1 || ! -t 0 || ! -t 1 ]] && [[ -z "$action" ]] && have zenity; then
+    case "$(zenity --list --radiolist --width=320 --height=220 --title="devlang" \
+              --text="O que deseja fazer?" --column="" --column="ação" \
+              TRUE "Instalar linguagem" FALSE "Remover linguagem" 2>/dev/null)" in
+      Remover*) action="remove" ;;
+      Instalar*) action="install" ;;
+      *) exit 0 ;;
+    esac
+  fi
+
+  local selected=()
+  case "$action" in
+    remove)
+      mapfile -t selected < <(menu_rows installed | choose "Linguagens para REMOVER do LazyVim")
+      ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
+      for id in "${selected[@]}"; do id="${id//[[:space:]]/}"; [[ -n "$id" ]] && uninstall_lang "$id"; done
+      ;;
+    install)
+      mapfile -t selected < <(menu_rows available | choose "Linguagens para INSTALAR no LazyVim")
+      ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
+      for id in "${selected[@]}"; do id="${id//[[:space:]]/}"; [[ -n "$id" ]] && install_lang "$id"; done
+      ;;
+    *)
+      # menu unificado: marcar uma instalada = remover; marcar uma disponível = instalar
+      mapfile -t selected < <(menu_rows all | choose "● = instalada (marcar remove) · ○ = disponível (marcar instala)")
+      ((${#selected[@]})) || { warn "nada selecionado"; exit 0; }
+      for id in "${selected[@]}"; do
+        id="${id//[[:space:]]/}"; [[ -z "$id" ]] && continue
+        if is_installed "$id"; then uninstall_lang "$id"; else install_lang "$id"; fi
+      done
+      ;;
+  esac
+
+  printf '\n%s\n' "${c_green}${c_bold}Concluído.${c_reset}"
   have zenity && [[ ! -t 1 ]] && zenity --info --width=320 \
-    --title="devlang" --text="Instalação concluída:\n${selected[*]}" 2>/dev/null || true
+    --title="devlang" --text="Concluído:\n${selected[*]}" 2>/dev/null || true
 }
 
 main "$@"

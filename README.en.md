@@ -21,13 +21,17 @@ entry in the application menu. It is idempotent — run it again after a `git pu
 ## Usage
 
 ```bash
-devlang              # menu (fzf/gum if installed; otherwise a zenity window)
+devlang              # unified menu — ○ available (installs) · ● installed (removes)
 devlang go rust      # install directly
-devlang --list       # available ids
+devlang -r go        # remove a language
+devlang --remove     # menu with only the installed languages
+devlang --list       # ids + what is installed
 devlang --gui        # force the graphical menu (zenity)
 ```
 
-Or click **Dev Languages** in the Pop!_OS application menu.
+Menus use `fzf` or `gum` if installed, otherwise `zenity`, otherwise a numbered list.
+
+Or click **Dev Languages** in the Pop!_OS application menu (it asks install/remove).
 
 ## What each install does
 
@@ -67,12 +71,30 @@ In `registry.sh`, copy a `lang_<id>()` block, adjust the fields and append the
 
 Extras list: <https://www.lazyvim.org/extras>
 
-## Uninstall
+## Removing a language
+
+```bash
+devlang -r go        # or: devlang --remove  (menu)
+```
+
+What happens:
+
+1. removes `lazyvim.plugins.extras.lang.<x>` from `lazyvim.json`
+2. `provision.lua` runs in _prune_ mode: uninstalls the **orphaned LSP servers and
+   parsers** — whatever your LazyVim config no longer wants. Parsers LazyVim ships
+   by default (e.g. `typescript`, `tsx`) **stay**, since LazyVim would reinstall
+   them on the next boot
+3. asks whether to also remove the **mise** runtime (`node`, `go`…) — your call,
+   since you may use it outside the editor
+4. `apt` packages (build-essential, headers…) are **not** removed (may be shared)
+
+devlang records what it installed in `~/.local/state/devlang/installed`.
+
+## Uninstalling devlang
 
 ```bash
 rm ~/.local/bin/devlang ~/.local/share/applications/devlang.desktop
-# runtimes stay in mise:  mise ls  /  mise uninstall <tool>
-# extras stay in lazyvim.json:  nvim +LazyExtras
+rm -rf ~/.local/share/devlang ~/.local/state/devlang
 ```
 
 ## License

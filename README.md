@@ -21,13 +21,18 @@ menu de aplicativos. É idempotente — rode de novo depois de um `git pull`.
 ## Uso
 
 ```bash
-devlang              # menu (fzf/gum se instalado; senão janela zenity)
+devlang              # menu unificado — ○ disponível (instala) · ● instalada (remove)
 devlang go rust      # instala direto
-devlang --list       # ids disponíveis
+devlang -r go        # remove a linguagem
+devlang --remove     # menu só com as linguagens instaladas
+devlang --list       # ids + o que está instalado
 devlang --gui        # força o menu gráfico (zenity)
 ```
 
-Ou clique em **Dev Languages** no menu de aplicativos do Pop!_OS.
+Menus: usa `fzf` ou `gum` se instalados, senão `zenity`, senão uma lista numerada.
+
+Ou clique em **Dev Languages** no menu de aplicativos do Pop!_OS (pergunta
+instalar/remover).
 
 ## O que cada instalação faz
 
@@ -67,12 +72,31 @@ Em `registry.sh`, copie um bloco `lang_<id>()`, ajuste os campos e acrescente o
 
 Lista de extras: <https://www.lazyvim.org/extras>
 
-## Desinstalar
+## Remover uma linguagem
+
+```bash
+devlang -r go        # ou: devlang --remove  (menu)
+```
+
+O que acontece:
+
+1. remove `lazyvim.plugins.extras.lang.<x>` do `lazyvim.json`
+2. `provision.lua` roda em modo _prune_: desinstala os **LSP servers e parsers
+   órfãos** — ou seja, o que não é mais desejado pela sua config do LazyVim.
+   Parsers que o LazyVim já traz por padrão (ex.: `typescript`, `tsx`)
+   **permanecem**, porque o LazyVim os reinstalaria no próximo boot
+3. pergunta se quer remover o runtime do **mise** também (`node`, `go`…) — fica a
+   seu critério, já que você pode usá-lo fora do editor
+4. pacotes `apt` (build-essential, headers…) **não** são removidos (podem ser
+   compartilhados com outras linguagens)
+
+O devlang registra o que instalou em `~/.local/state/devlang/installed`.
+
+## Desinstalar o devlang
 
 ```bash
 rm ~/.local/bin/devlang ~/.local/share/applications/devlang.desktop
-# runtimes continuam no mise:  mise ls  /  mise uninstall <tool>
-# extras continuam no lazyvim.json:  nvim +LazyExtras
+rm -rf ~/.local/share/devlang ~/.local/state/devlang
 ```
 
 ## Licença

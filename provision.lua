@@ -1,22 +1,23 @@
 -- provision.lua — roda via:  nvim --headless -u <init.lua> -c "luafile provision.lua"
 --
--- Faz, de forma síncrona, o que o LazyVim faria numa 1ª abertura interativa:
---   1. Lazy sync (instala/atualiza plugins)
---   2. mason.nvim: instala as ferramentas base (formatters/linters, tree-sitter-cli)
---   3. nvim-treesitter (branch main): instala os parsers do ensure_installed
---   4. nvim-lspconfig + mason-lspconfig: instala os LSP servers dos extras ativos
+-- Sincroniza o Neovim com o estado declarado em lazyvim.json, de forma síncrona
+-- (em --headless o LazyVim não carrega os plugins lazy-loaded sozinho):
+--   1. Lazy sync (instala/atualiza/remove plugins)
+--   2. mason.nvim: ferramentas base (formatters/linters, tree-sitter-cli)
+--   3. nvim-treesitter (branch main): parsers do ensure_installed
+--   4. nvim-lspconfig + mason-lspconfig: LSP servers dos extras ativos
 --
--- Extras opcionais via variáveis de ambiente:
---   DEVLANG_TS="typescript tsx"        -> parsers adicionais
---   DEVLANG_MASON="prettier eslint-lsp" -> pacotes Mason adicionais
+-- Env:
+--   DEVLANG_TS="typescript tsx"          parsers adicionais a instalar
+--   DEVLANG_MASON="prettier eslint-lsp"  pacotes Mason adicionais a instalar
+--   DEVLANG_PRUNE=1                       remove parsers/pacotes que não são mais
+--                                        desejados pela config (usado no uninstall)
+
+local PRUNE = vim.env.DEVLANG_PRUNE == "1"
 
 local function log(m) io.stderr:write("    [provision] " .. tostring(m) .. "\n") end
+local function split(s) return vim.split(s or "", "%s+", { trimempty = true }) end
 
-local function split(s)
-  return vim.split(s or "", "%s+", { trimempty = true })
-end
-
--- opts finais de um plugin (já com o merge feito pelos extras do LazyVim)
 local function plugin_opts(name)
   local ok, Plugin = pcall(require, "lazy.core.plugin")
   local okc, Config = pcall(require, "lazy.core.config")
@@ -29,6 +30,8 @@ local function load(plugins)
   pcall(function() require("lazy").load({ plugins = plugins }) end)
 end
 
+local function set_of(list) local s = {} for _, v in ipairs(list) do s[v] = true end return s end
+
 -- 1. plugins ---------------------------------------------------------------
 log("Lazy sync…")
 pcall(function() require("lazy").sync({ wait = true, show = false }) end)
@@ -36,57 +39,80 @@ pcall(function() require("lazy").sync({ wait = true, show = false }) end)
 -- 2. mason base ----------------------------------------------------------
 load({ "mason.nvim" })
 vim.wait(1500)
--- garante o mason/bin no PATH desta sessão (tree-sitter, etc.)
-local mason_bin = vim.fn.stdpath("data") .. "/mason/bin"
-vim.env.PATH = mason_bin .. ":" .. (vim.env.PATH or "")
+vim.env.PATH = vim.fn.stdpath("data") .. "/mason/bin:" .. (vim.env.PATH or "")
 
--- 3. treesitter (branch main: require('nvim-treesitter').install(langs):wait()) --
-pcall(function()
-  load({ "nvim-treesitter" })
-  local want = plugin_opts("nvim-treesitter").ensure_installed
-  if type(want) ~= "table" then want = {} end
-  for _, p in ipairs(split(vim.env.DEVLANG_TS)) do want[#want + 1] = p end
-  if #want > 0 then
-    log("treesitter: " .. table.concat(want, " "))
-    local nti = require("nvim-treesitter")
-    local task = nti.install(want)
-    if type(task) == "table" and task.wait then
-      task:wait(600000)
-    end
-    log("treesitter ok: " .. table.concat(nti.get_installed(), " "))
-  end
-end)
-
--- 4. mason: LSP servers dos extras + ferramentas base ---------------------
-load({ "mason-lspconfig.nvim", "nvim-lspconfig" })
+-- ---- conjuntos desejados ---------------------------------------------------
+load({ "nvim-treesitter", "mason-lspconfig.nvim", "nvim-lspconfig" })
 vim.wait(2000)
 
-local want = {}
+local ts_want = plugin_opts("nvim-treesitter").ensure_installed
+if type(ts_want) ~= "table" then ts_want = {} end
+for _, p in ipairs(split(vim.env.DEVLANG_TS)) do ts_want[#ts_want + 1] = p end
+local ts_desired = set_of(ts_want)
+
+local mason_desired = {}
 pcall(function()
   local servers = plugin_opts("nvim-lspconfig").servers or {}
   local map = require("mason-lspconfig.mappings").get_mason_map().lspconfig_to_package
   for name, cfg in pairs(servers) do
     local off = type(cfg) == "table" and (cfg.enabled == false or cfg.mason == false)
-    if not off and map[name] then want[map[name]] = true end
+    if not off and map[name] then mason_desired[map[name]] = true end
   end
 end)
-pcall(function()
-  for _, t in ipairs(plugin_opts("mason.nvim").ensure_installed or {}) do want[t] = true end
-end)
-for _, p in ipairs(split(vim.env.DEVLANG_MASON)) do want[p] = true end
+for _, t in ipairs(plugin_opts("mason.nvim").ensure_installed or {}) do mason_desired[t] = true end
+for _, p in ipairs(split(vim.env.DEVLANG_MASON)) do mason_desired[p] = true end
+mason_desired["tree-sitter-cli"] = true -- dependência do nvim-treesitter (branch main)
+
+-- 3. treesitter ----------------------------------------------------------
+local nti = require("nvim-treesitter")
+if #ts_want > 0 then
+  log("treesitter: instalando " .. table.concat(ts_want, " "))
+  pcall(function()
+    local task = nti.install(ts_want)
+    if type(task) == "table" and task.wait then task:wait(600000) end
+  end)
+end
+if PRUNE then
+  local orphans = {}
+  for _, lang in ipairs(nti.get_installed()) do
+    if not ts_desired[lang] then orphans[#orphans + 1] = lang end
+  end
+  if #orphans > 0 then
+    log("treesitter: removendo " .. table.concat(orphans, " "))
+    pcall(function()
+      local task = nti.uninstall(orphans)
+      if type(task) == "table" and task.wait then task:wait(120000) end
+    end)
+  end
+end
+pcall(function() log("treesitter ok: " .. table.concat(nti.get_installed(), " ")) end)
+
+-- 4. mason -------------------------------------------------------------------
+local mr = require("mason-registry")
+mr.refresh()
+
+local mason_install = {}
+for name in pairs(mason_desired) do
+  if pcall(mr.get_package, name) then mason_install[#mason_install + 1] = name end
+end
+table.sort(mason_install)
+if #mason_install > 0 then
+  log("mason: " .. table.concat(mason_install, " "))
+  pcall(vim.cmd, "MasonInstall " .. table.concat(mason_install, " ")) -- bloqueante em headless
+end
+
+if PRUNE then
+  local orphans = {}
+  for _, p in ipairs(mr.get_installed_packages()) do
+    if not mason_desired[p.name] then orphans[#orphans + 1] = p.name end
+  end
+  if #orphans > 0 then
+    log("mason: removendo " .. table.concat(orphans, " "))
+    pcall(vim.cmd, "MasonUninstall " .. table.concat(orphans, " "))
+  end
+end
 
 pcall(function()
-  local mr = require("mason-registry")
-  mr.refresh()
-  local valid = {}
-  for name in pairs(want) do
-    if pcall(mr.get_package, name) then valid[#valid + 1] = name end
-  end
-  table.sort(valid)
-  if #valid > 0 then
-    log("mason: " .. table.concat(valid, " "))
-    pcall(vim.cmd, "MasonInstall " .. table.concat(valid, " ")) -- bloqueante em headless
-  end
   local done = {}
   for _, p in ipairs(mr.get_installed_packages()) do done[#done + 1] = p.name end
   table.sort(done)
