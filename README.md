@@ -29,10 +29,12 @@ devlang --list       # ids + o que está instalado
 devlang --gui        # força o menu gráfico (zenity)
 ```
 
-Menus: usa `fzf` ou `gum` se instalados, senão `zenity`, senão uma lista numerada.
+Menu, em ordem de preferência: `fzf` → `whiptail` (já vem no Pop!_OS) → `gum` →
+lista numerada. Tudo **dentro do terminal, numa janela só**. O `zenity` só entra
+quando não há terminal nenhum, ou com `--gui`.
 
-Ou clique em **Dev Languages** no menu de aplicativos do Pop!_OS (pergunta
-instalar/remover).
+Ou clique em **Dev Languages** no menu de aplicativos do Pop!_OS: abre um terminal
+com o menu (uma janela), instala/remove ali mesmo e espera um ENTER no fim.
 
 ## O que cada instalação faz
 
@@ -50,9 +52,9 @@ instalar/remover).
 
 | Arquivo | Papel |
 |---|---|
-| `devlang` | script principal (menu + instalação) |
+| `devlang` | script principal (menu + instalação + remoção) |
 | `registry.sh` | catálogo de linguagens — **edite aqui para adicionar/remover** |
-| `provision.lua` | roda no `nvim --headless`: carrega os plugins e instala parser/LSP |
+| `provision.lua` | roda no `nvim --headless`: carrega os plugins e instala/poda parser/LSP |
 | `install.sh` | cria symlink + entrada de menu |
 | `devlang.desktop.in` | template da entrada do menu de aplicativos |
 

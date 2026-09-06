@@ -258,10 +258,11 @@ uninstall_lang() {
   printf '%s\n' "${c_green}${c_bold}✓ $LABEL removido do LazyVim.${c_reset}"
 }
 
-confirm() {  # confirm "pergunta?"  -> 0/1 ; assume "não" fora de tty
+confirm() {  # confirm "pergunta?"  -> 0/1 ; assume "não" sem terminal
   local q="$1" a
-  [[ -t 0 ]] || return 1
-  read -r -p "$(printf '%s%s%s [s/N] ' "${c_yellow}" "$q" "${c_reset}")" a || true
+  [[ -t 2 || -e /dev/tty ]] || return 1
+  printf '%s%s%s [s/N] ' "${c_yellow}" "$q" "${c_reset}" >&2
+  read -r a </dev/tty || return 1
   [[ "$a" =~ ^[sSyY]$ ]]
 }
 
@@ -285,37 +286,54 @@ menu_rows() {
 }
 
 # lê rows no stdin, escreve ids escolhidos no stdout.  $1 = cabeçalho
+# Prioriza menus DENTRO do terminal (uma janela só). zenity é só p/ launch sem tty
+# ou quando o usuário força com --gui.
 choose() {
   local header="$1" rows; rows="$(cat)"
   [[ -z "$rows" ]] && return 0
+  local id flag disp
 
-  if [[ -t 0 && -t 1 ]] && have fzf; then
-    printf '%s\n' "$rows" | fzf --multi --delimiter='\t' --with-nth=3 --nth=3 \
-      --prompt="devlang> " --header="$header  ·  TAB marca, ENTER confirma" | cut -f1
-  elif [[ -t 0 && -t 1 ]] && have gum; then
+  if [[ "${FORCE_ZENITY:-0}" != 1 && -t 2 ]] && have fzf; then
+    # fzf lê os candidatos do stdin (pipe) e abre /dev/tty sozinho para a UI
+    printf '%s\n' "$rows" | fzf --multi --delimiter='\t' --with-nth=3 \
+      --height=100% --border --reverse --prompt="devlang> " \
+      --header="$header"$'\n''TAB marca · ENTER confirma · ESC cancela' | cut -f1
+
+  elif [[ "${FORCE_ZENITY:-0}" != 1 && -t 2 ]] && have whiptail; then
+    local args=() rowcount
+    while IFS=$'\t' read -r id flag disp; do args+=("$id" "$disp" off); done <<< "$rows"
+    rowcount=$(printf '%s\n' "$rows" | grep -c .)
+    local n=$rowcount; ((n > 14)) && n=14
+    whiptail --title "devlang" --notags --separate-output \
+      --checklist "$header\n(ESPAÇO marca · ENTER confirma)" $((n + 9)) 78 "$n" \
+      "${args[@]}" 3>&1 1>&2 2>&3 </dev/tty
+
+  elif [[ "${FORCE_ZENITY:-0}" != 1 && -t 2 ]] && have gum; then
     local sel; sel="$(printf '%s\n' "$rows" | cut -f3 | gum choose --no-limit --header "$header")"
     local d
     while IFS= read -r d; do
       [[ -z "$d" ]] && continue
       printf '%s\n' "$rows" | awk -F'\t' -v d="$d" '$3==d{print $1}'
     done <<< "$sel"
+
+  elif [[ "${FORCE_ZENITY:-0}" != 1 && -t 2 ]]; then
+    local ids=() disps=() i
+    while IFS=$'\t' read -r id flag disp; do ids+=("$id"); disps+=("$disp"); done <<< "$rows"
+    printf '\n%s\n' "$header" >&2
+    for i in "${!ids[@]}"; do printf '  %2d) %s\n' "$((i + 1))" "${disps[$i]}" >&2; done
+    printf '\nnúmeros (separados por espaço): ' >&2
+    local nums n; read -r nums </dev/tty || true
+    for n in $nums; do [[ "$n" =~ ^[0-9]+$ ]] && printf '%s\n' "${ids[$((n - 1))]:-}"; done
+
   elif have zenity; then
-    local args=() id flag disp
+    local args=()
     while IFS=$'\t' read -r id flag disp; do args+=(FALSE "$id" "$disp"); done <<< "$rows"
     zenity --list --checklist --width=480 --height=600 \
       --title="devlang" --text="$header" \
       --column="" --column="id" --column="Linguagem" --hide-column=2 --print-column=2 \
       "${args[@]}" 2>/dev/null | tr '|' '\n'
-  elif [[ -t 0 ]]; then
-    local ids=() disps=() id flag disp i
-    while IFS=$'\t' read -r id flag disp; do ids+=("$id"); disps+=("$disp"); done <<< "$rows"
-    printf '%s\n' "$header" >&2
-    for i in "${!ids[@]}"; do printf '  %2d) %s\n' "$((i + 1))" "${disps[$i]}" >&2; done
-    printf 'números (separados por espaço): ' >&2
-    local nums n; read -r nums || true
-    for n in $nums; do [[ "$n" =~ ^[0-9]+$ ]] && printf '%s\n' "${ids[$((n - 1))]:-}"; done
   else
-    die "sem fzf/gum/zenity e sem terminal interativo; use: devlang <id>…"
+    die "sem fzf/whiptail/gum/zenity e sem terminal interativo; use: devlang <id>…"
   fi
 }
 
@@ -325,7 +343,7 @@ choose() {
 usage() { sed -n '3,14p' "$0" | sed 's/^# \{0,1\}//'; }
 
 main() {
-  local action="" gui=0 args=()
+  local action="" args=()
   while (($#)); do
     case "$1" in
       -h|--help)               usage; exit 0 ;;
@@ -337,7 +355,7 @@ main() {
         exit 0 ;;
       -r|--remove|--uninstall) action="remove" ;;
       -i|--install)            action="install" ;;
-      --gui)                   gui=1 ;;
+      --gui)                   FORCE_ZENITY=1 ;;
       --) shift; args+=("$@"); break ;;
       -*) die "opção desconhecida: $1" ;;
       *)  args+=("$1") ;;
@@ -354,8 +372,9 @@ main() {
     return 0
   fi
 
-  # menu gráfico sem terminal: pergunta a ação primeiro
-  if [[ $gui == 1 || ! -t 0 || ! -t 1 ]] && [[ -z "$action" ]] && have zenity; then
+  # Sem terminal algum (launch gráfico puro) ou --gui: pergunta a ação via zenity.
+  # Com terminal, o menu unificado já cobre instalar E remover numa janela só.
+  if [[ -z "$action" ]] && { [[ "${FORCE_ZENITY:-0}" == 1 ]] || [[ ! -t 2 && ! -e /dev/tty ]]; } && have zenity; then
     case "$(zenity --list --radiolist --width=320 --height=220 --title="devlang" \
               --text="O que deseja fazer?" --column="" --column="ação" \
               TRUE "Instalar linguagem" FALSE "Remover linguagem" 2>/dev/null)" in
@@ -389,8 +408,12 @@ main() {
   esac
 
   printf '\n%s\n' "${c_green}${c_bold}Concluído.${c_reset}"
-  have zenity && [[ ! -t 1 ]] && zenity --info --width=320 \
-    --title="devlang" --text="Concluído:\n${selected[*]}" 2>/dev/null || true
+
+  # lançado pelo menu de aplicativos: não deixa o terminal fechar na cara do usuário
+  if [[ "${DEVLANG_LAUNCHER:-}" == desktop && -e /dev/tty ]]; then
+    printf '\n%s' "Pressione ENTER para fechar… " >&2
+    read -r _ </dev/tty || true
+  fi
 }
 
 main "$@"

@@ -29,9 +29,12 @@ devlang --list       # ids + what is installed
 devlang --gui        # force the graphical menu (zenity)
 ```
 
-Menus use `fzf` or `gum` if installed, otherwise `zenity`, otherwise a numbered list.
+Menu, in order of preference: `fzf` → `whiptail` (ships with Pop!_OS) → `gum` →
+numbered list. All **inside the terminal, one window**. `zenity` is used only when
+there is no terminal at all, or with `--gui`.
 
-Or click **Dev Languages** in the Pop!_OS application menu (it asks install/remove).
+Or click **Dev Languages** in the Pop!_OS application menu: it opens one terminal
+with the menu, installs/removes right there, and waits for ENTER at the end.
 
 ## What each install does
 

@@ -2,7 +2,7 @@
 Type=Application
 Name=Dev Languages
 Comment=Instala linguagens e configura o LazyVim (parser, LSP, formatter)
-Exec=env PATH=@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin @DEVLANG@
+Exec=env PATH=@HOME@/.local/bin:/usr/local/bin:/usr/bin:/bin DEVLANG_LAUNCHER=desktop @DEVLANG@
 Icon=applications-development
 Terminal=true
 Categories=Development;Utility;
